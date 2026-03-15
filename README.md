@@ -45,7 +45,7 @@
 
 ### Step 2 — Set your token
 
-Open `pikpak_gdrive_bot.py` and replace the token on **line 12**:
+Open `main.py` and replace the token on **line 12**:
 
 ```python
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
@@ -176,7 +176,7 @@ If you see `captcha_invalid` or `result:review`:
 ## 📁 File Structure
 
 ```
-pikpak_gdrive_bot.py     # ← the entire bot, single file
+main.py     # ← the entire bot, single file
 .bot.lock                # process lock (auto-created, auto-deleted)
 tg_api_data/             # local Bot API server data (if used)
 ~/.pikpak_gdrive_bot.db  # SQLite database (users, transfers, settings)
