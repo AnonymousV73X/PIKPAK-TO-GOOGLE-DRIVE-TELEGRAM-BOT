@@ -54,8 +54,13 @@ BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 ### Step 3 — Run the bot
 
 ```bash
-python pikpak_gdrive_bot.py
+python main.py 
 ```
+Or
+```bash
+!python main.py 
+```
+If you're on colab
 
 > Everything else — `rclone`, the SQLite database, config files — is handled automatically on first run.
 
