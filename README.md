@@ -143,9 +143,9 @@ The local server starts automatically on the next bot restart.
 The bot runs fine in a Colab cell with no modifications:
 
 ```python
-!git clone https://github.com/YOUR_USERNAME/pikpak-gdrive-bot
-%cd pikpak-gdrive-bot
-!python pikpak_gdrive_bot.py
+!git clone https://github.com/AnonymousV73X/PIKPAK-TO-GOOGLE-DRIVE-TELEGRAM-BOT
+%cd PIKPAK-TO-GOOGLE-DRIVE-TELEGRAM-BOT
+!python main.py
 ```
 
 Set your `BOT_TOKEN` before running. Use Colab's high-bandwidth network for fast transfers.
