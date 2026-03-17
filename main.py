@@ -51,6 +51,7 @@ def install_package(package):
             stdout=subprocess.DEVNULL,
         )
         import importlib
+
         importlib.invalidate_caches()
 
 
@@ -127,8 +128,23 @@ def _find_local_api_bin() -> str:
             return direct
 
     SKIP = {
-        "proc", "sys", "dev", "run", "snap", "boot", "lib", "lib64", "lib32",
-        "usr", "bin", "sbin", "etc", "var", "lost+found", "__pycache__", ".git",
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        "snap",
+        "boot",
+        "lib",
+        "lib64",
+        "lib32",
+        "usr",
+        "bin",
+        "sbin",
+        "etc",
+        "var",
+        "lost+found",
+        "__pycache__",
+        ".git",
         "node_modules",
     }
     crawled = set()
@@ -267,24 +283,27 @@ def stop_local_api():
 # ?  ★  CONFIGURATION  —  edit this before running  ★
 # ? ══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "ADD YOUR TOKEN HERE"
+BOT_TOKEN = "YOUR TOKEN HERE"
 
 # ? ══════════════════════════════════════════════════════════════
 
 
 def make_bot(use_local: bool) -> telebot.TeleBot:
-    if use_local:
-        import telebot.apihelper as _ah
-        _ah.API_URL = f"http://127.0.0.1:{LOCAL_API_PORT}" + "/bot{0}/{1}"
+    import telebot.apihelper as _ah
+
+    # Always reset to official API first — prevents poisoned URL from previous run
+    _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
+    if not use_local:
+        return telebot.TeleBot(BOT_TOKEN, num_threads=8)
+    _ah.API_URL = f"http://127.0.0.1:{LOCAL_API_PORT}/bot{{0}}/{{1}}"
     b = telebot.TeleBot(BOT_TOKEN, num_threads=8)
-    if use_local:
-        try:
-            b.get_me()
-        except:
-            import telebot.apihelper as _ah
-            _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
-            return telebot.TeleBot(BOT_TOKEN, num_threads=8)
-    return b
+    try:
+        b.get_me()
+        return b
+    except Exception:
+        # Local API unreachable — fully fall back to official API
+        _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
+        return telebot.TeleBot(BOT_TOKEN, num_threads=8)
 
 
 # . ─── Database ─────────────────────────────────────────────────────────────────
@@ -376,6 +395,10 @@ init_db()
 def _boot_local_api() -> bool:
     if not os.path.isfile(LOCAL_API_BIN):
         return False
+    # If server survived a previous run and is already up, just use it
+    if _local_api_running():
+        print("✓ Local Bot API already running, reusing.")
+        return True
     try:
         with get_db() as conn:
             row = conn.execute(
@@ -387,7 +410,7 @@ def _boot_local_api() -> bool:
                 BOT_TOKEN, api_id=row["tg_api_id"], api_hash=row["tg_api_hash"]
             )
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -482,8 +505,16 @@ class UserManager:
 
     @staticmethod
     def save_transfer(
-        user_id, status, start_time, end_time, destination_folder,
-        files_count, total_size, transferred_size, speed, error_message,
+        user_id,
+        status,
+        start_time,
+        end_time,
+        destination_folder,
+        files_count,
+        total_size,
+        transferred_size,
+        speed,
+        error_message,
     ):
         with get_db() as conn:
             conn.execute(
@@ -492,8 +523,16 @@ class UserManager:
                     files_count,total_size,transferred_size,speed,error_message)
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    user_id, status, start_time, end_time, destination_folder,
-                    files_count, total_size, transferred_size, speed, error_message,
+                    user_id,
+                    status,
+                    start_time,
+                    end_time,
+                    destination_folder,
+                    files_count,
+                    total_size,
+                    transferred_size,
+                    speed,
+                    error_message,
                 ),
             )
             conn.commit()
@@ -549,15 +588,69 @@ class UserManager:
 
 def generate_alien_name():
     prefixes = [
-        "Zor", "Xen", "Qua", "Vor", "Kly", "Sor", "Tyr", "Neb", "Gal", "Cos",
-        "Andro", "Nebu", "Puls", "Quas", "Supern", "Epsil", "Centa", "Proxim",
-        "Anta", "Betel", "Rigel", "Alde", "Arctu", "Spic", "Poll", "Fomal",
-        "Deneb", "Regul", "Cast", "Bella", "Mira", "Alta", "Algo", "Capel", "Canop",
+        "Zor",
+        "Xen",
+        "Qua",
+        "Vor",
+        "Kly",
+        "Sor",
+        "Tyr",
+        "Neb",
+        "Gal",
+        "Cos",
+        "Andro",
+        "Nebu",
+        "Puls",
+        "Quas",
+        "Supern",
+        "Epsil",
+        "Centa",
+        "Proxim",
+        "Anta",
+        "Betel",
+        "Rigel",
+        "Alde",
+        "Arctu",
+        "Spic",
+        "Poll",
+        "Fomal",
+        "Deneb",
+        "Regul",
+        "Cast",
+        "Bella",
+        "Mira",
+        "Alta",
+        "Algo",
+        "Capel",
+        "Canop",
     ]
     suffixes = [
-        "blax", "dor", "gon", "thar", "zon", "nax", "tar", "vax", "rox", "lax",
-        "meda", "ula", "axy", "ion", "us", "ar", "ix", "um", "ra", "is",
-        "nova", "ius", "on", "os", "a", "or",
+        "blax",
+        "dor",
+        "gon",
+        "thar",
+        "zon",
+        "nax",
+        "tar",
+        "vax",
+        "rox",
+        "lax",
+        "meda",
+        "ula",
+        "axy",
+        "ion",
+        "us",
+        "ar",
+        "ix",
+        "um",
+        "ra",
+        "is",
+        "nova",
+        "ius",
+        "on",
+        "os",
+        "a",
+        "or",
     ]
     name = f"{random.choice(prefixes)}{random.choice(suffixes)}"
     if random.random() > 0.7:
@@ -586,8 +679,22 @@ def fmt_dt(dt: datetime) -> str:
 
 
 VIDEO_EXTS = [
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "mpg", "mpeg",
-    "m4v", "3gp", "ts", "m2ts", "vob", "rmvb", "rm",
+    "mp4",
+    "mkv",
+    "avi",
+    "mov",
+    "wmv",
+    "flv",
+    "webm",
+    "mpg",
+    "mpeg",
+    "m4v",
+    "3gp",
+    "ts",
+    "m2ts",
+    "vob",
+    "rmvb",
+    "rm",
 ]
 
 
@@ -595,48 +702,73 @@ VIDEO_EXTS = [
 
 
 def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None):
+    import telebot.apihelper as _ah
+
     text = str(text)
-    if len(text) <= 4000:
-        kwargs = dict(chat_id=chat_id, text=text, parse_mode=parse_mode)
-        if reply_markup:
-            kwargs["reply_markup"] = reply_markup
-        if reply_to:
-            kwargs["reply_to_message_id"] = reply_to
-        try:
+
+    def _attempt():
+        if len(text) <= 4000:
+            kwargs = dict(chat_id=chat_id, text=text, parse_mode=parse_mode)
+            if reply_markup:
+                kwargs["reply_markup"] = reply_markup
+            if reply_to:
+                kwargs["reply_to_message_id"] = reply_to
             return bot.send_message(**kwargs)
-        except Exception as e:
-            print(f"[send_msg] {e}")
-            return None
-    chunks, buf = [], ""
-    for line in text.split("\n"):
-        if len(buf) + len(line) + 1 > 4000:
-            if buf:
-                chunks.append(buf)
-            buf = line
-        else:
-            buf = (buf + "\n" + line) if buf else line
-    if buf:
-        chunks.append(buf)
-    sent = None
-    for i, chunk in enumerate(chunks):
-        markup = reply_markup if i == len(chunks) - 1 else None
-        header = f"<b>({i+1}/{len(chunks)})</b>\n" if i > 0 else ""
-        kwargs = dict(chat_id=chat_id, text=header + chunk, parse_mode=parse_mode)
-        if markup:
-            kwargs["reply_markup"] = markup
-        if reply_to and i == 0:
-            kwargs["reply_to_message_id"] = reply_to
-        try:
-            sent = bot.send_message(**kwargs)
-        except Exception as e:
-            print(f"[send_msg chunk {i+1}] {e}")
-        time.sleep(0.3)
-    return sent
+        # Chunked send for long messages
+        chunks, buf = [], ""
+        for line in text.split("\n"):
+            if len(buf) + len(line) + 1 > 4000:
+                if buf:
+                    chunks.append(buf)
+                buf = line
+            else:
+                buf = (buf + "\n" + line) if buf else line
+        if buf:
+            chunks.append(buf)
+        sent = None
+        for i, chunk in enumerate(chunks):
+            markup = reply_markup if i == len(chunks) - 1 else None
+            header = f"<b>({i+1}/{len(chunks)})</b>\n" if i > 0 else ""
+            kwargs = dict(chat_id=chat_id, text=header + chunk, parse_mode=parse_mode)
+            if markup:
+                kwargs["reply_markup"] = markup
+            if reply_to and i == 0:
+                kwargs["reply_to_message_id"] = reply_to
+            try:
+                sent = bot.send_message(**kwargs)
+            except Exception as e:
+                print(f"[send_msg chunk {i+1}] {e}")
+            time.sleep(0.3)
+        return sent
+
+    try:
+        return _attempt()
+    except Exception as e:
+        err_str = str(e).lower()
+        if _using_local_api and (
+            "connection refused" in err_str or "max retries" in err_str
+        ):
+            # Local API is down — transparently fall back to official API for this one call
+            print(f"[send_msg] local API unreachable, falling back to official API")
+            old_url = _ah.API_URL
+            _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
+            try:
+                return _attempt()
+            except Exception as e2:
+                print(f"[send_msg fallback] {e2}")
+                return None
+            finally:
+                _ah.API_URL = old_url  # always restore
+        print(f"[send_msg] {e}")
+        return None
 
 
 def edit_msg(chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
+    import telebot.apihelper as _ah
+
     text = str(text)[:4000]
-    try:
+
+    def _attempt():
         bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
@@ -645,10 +777,29 @@ def edit_msg(chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
             reply_markup=reply_markup,
         )
         return True
+
+    try:
+        return _attempt()
     except Exception as e:
-        s = str(e).lower()
-        if "message is not modified" in s:
+        err_str = str(e).lower()
+        if "message is not modified" in err_str:
             return True
+        if _using_local_api and (
+            "connection refused" in err_str or "max retries" in err_str
+        ):
+            print(f"[edit_msg] local API unreachable, falling back to official API")
+            old_url = _ah.API_URL
+            _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
+            try:
+                return _attempt()
+            except Exception as e2:
+                s2 = str(e2).lower()
+                if "message is not modified" in s2:
+                    return True
+                print(f"[edit_msg fallback] {e2}")
+                return False
+            finally:
+                _ah.API_URL = old_url
         print(f"[edit_msg] {e}")
         return False
 
@@ -661,12 +812,18 @@ def delete_msg(chat_id, message_id):
 
 
 def smart_send_or_edit(
-    user_id: int, msg_type: str, chat_id: int, text: str,
-    reply_markup=None, parse_mode="HTML",
+    user_id: int,
+    msg_type: str,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+    parse_mode="HTML",
 ) -> int | None:
     old_chat, old_mid = MsgStore.get(user_id, msg_type)
     if old_chat and old_mid:
-        ok = edit_msg(old_chat, old_mid, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        ok = edit_msg(
+            old_chat, old_mid, text, parse_mode=parse_mode, reply_markup=reply_markup
+        )
         if ok:
             return old_mid
         MsgStore.clear(user_id, msg_type)
@@ -816,8 +973,8 @@ class TransferManager:
         self.total_size_bytes = 0
         self.files_done = 0
         self.transfer_attempt = 0
-        self.reconnect_count = 0          # how many WebDAV reconnects happened
-        self.current_file_name = ""       # file currently transferring
+        self.reconnect_count = 0  # how many WebDAV reconnects happened
+        self.current_file_name = ""  # file currently transferring
         self.config = UserManager.get_config(user_id)
         self.rclone_path = os.path.expanduser(f"~/.local/bin/rclone_{user_id}")
         self.config_file = os.path.expanduser(f"~/.config/rclone/user_{user_id}.conf")
@@ -832,46 +989,68 @@ class TransferManager:
         print(entry)
         self.logs.append(entry)
 
-    def info(self, m):  self._log("INFO", m)
-    def ok(self, m):    self._log("OK",   m)
-    def warn(self, m):  self._log("WARN", m)
-    def err(self, m):   self._log("ERR",  m)
-    def head(self, m):  self._log("HEAD", m)
+    def info(self, m):
+        self._log("INFO", m)
+
+    def ok(self, m):
+        self._log("OK", m)
+
+    def warn(self, m):
+        self._log("WARN", m)
+
+    def err(self, m):
+        self._log("ERR", m)
+
+    def head(self, m):
+        self._log("HEAD", m)
 
     def _edit(self, text, markup=None):
         if not self.status_msg_id:
             return
-        edit_msg(self.chat_id, self.status_msg_id, str(text)[:4000],
-                 parse_mode="HTML", reply_markup=markup)
+        edit_msg(
+            self.chat_id,
+            self.status_msg_id,
+            str(text)[:4000],
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
 
     def _stop_kb(self):
         kb = InlineKeyboardMarkup()
-        kb.row(InlineKeyboardButton("⏹  Stop Transfer", callback_data=f"stop_{self.user_id}"))
+        kb.row(
+            InlineKeyboardButton(
+                "⏹  Stop Transfer", callback_data=f"stop_{self.user_id}"
+            )
+        )
         return kb
 
     def _live_kb(self):
         kb = InlineKeyboardMarkup()
         kb.row(
             InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_{self.user_id}"),
-            InlineKeyboardButton("⏹  Stop",   callback_data=f"stop_{self.user_id}"),
+            InlineKeyboardButton("⏹  Stop", callback_data=f"stop_{self.user_id}"),
         )
         return kb
 
     def render_status(self, phase="transferring") -> str:
         elapsed = (
             str(datetime.now() - self.start_time).split(".")[0]
-            if self.start_time else "—"
+            if self.start_time
+            else "—"
         )
         if phase == "scanning":
-            return "\n".join([
-                "🔭 <b>Scanning PikPak…</b>", "",
-                "📡  Listing all files…",
-                f"⏱   Elapsed : <b>{elapsed}</b>",
-            ])[:4000]
+            return "\n".join(
+                [
+                    "🔭 <b>Scanning PikPak…</b>",
+                    "",
+                    "📡  Listing all files…",
+                    f"⏱   Elapsed : <b>{elapsed}</b>",
+                ]
+            )[:4000]
 
         ns = self.network_monitor.get_stats()
         total_files = len(self.video_files)
-        done_files  = self.files_done
+        done_files = self.files_done
 
         if total_files > 0 and done_files > 0:
             pct = min(int(done_files / total_files * 100), 100)
@@ -892,7 +1071,11 @@ class TransferManager:
             current_line = ""
 
         # ── Reconnect badge ───────────────────────────────────────────────
-        rc_badge = f"  🔁 <b>{self.reconnect_count}</b> reconnects" if self.reconnect_count > 0 else ""
+        rc_badge = (
+            f"  🔁 <b>{self.reconnect_count}</b> reconnects"
+            if self.reconnect_count > 0
+            else ""
+        )
 
         # ── Speed indicator emoji ─────────────────────────────────────────
         up_bps = ns["upload_bps"]
@@ -929,15 +1112,18 @@ class TransferManager:
     # ── rclone install ─────────────────────────────────────────────────────────
 
     def _install_rclone(self) -> bool:
-        url     = "https://downloads.rclone.org/rclone-current-linux-amd64.zip"
-        tmp     = f"/tmp/rclone_install_{self.user_id}"
-        zip_p   = os.path.join(tmp, "rclone.zip")
+        url = "https://downloads.rclone.org/rclone-current-linux-amd64.zip"
+        tmp = f"/tmp/rclone_install_{self.user_id}"
+        zip_p = os.path.join(tmp, "rclone.zip")
         bin_dir = os.path.dirname(self.rclone_path)
 
         def _get_version(path: str):
             try:
-                r = subprocess.run([path, "version"], capture_output=True, text=True, timeout=10)
+                r = subprocess.run(
+                    [path, "version"], capture_output=True, text=True, timeout=10
+                )
                 import re as _re
+
                 m = _re.search(r"rclone v(\d+)\.(\d+)", r.stdout + r.stderr)
                 if m:
                     return int(m.group(1)), int(m.group(2))
@@ -949,13 +1135,14 @@ class TransferManager:
             self.info("Downloading rclone…")
             self._edit("⏳ <b>Setup</b>\n\nDownloading latest rclone…")
             try:
-                os.makedirs(tmp,     exist_ok=True)
+                os.makedirs(tmp, exist_ok=True)
                 os.makedirs(bin_dir, exist_ok=True)
                 urllib.request.urlretrieve(url, zip_p)
                 with zipfile.ZipFile(zip_p, "r") as z:
                     z.extractall(tmp)
                 dirs = [
-                    d for d in os.listdir(tmp)
+                    d
+                    for d in os.listdir(tmp)
                     if os.path.isdir(os.path.join(tmp, d)) and d.startswith("rclone-")
                 ]
                 if not dirs:
@@ -965,7 +1152,11 @@ class TransferManager:
                 shutil.copy2(binary, self.rclone_path)
                 os.chmod(
                     self.rclone_path,
-                    stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH,
+                    stat.S_IRWXU
+                    | stat.S_IRGRP
+                    | stat.S_IXGRP
+                    | stat.S_IROTH
+                    | stat.S_IXOTH,
                 )
                 shutil.rmtree(tmp, ignore_errors=True)
                 return True
@@ -1051,9 +1242,7 @@ class TransferManager:
             self.warn("No videos found.")
             return False
 
-        filter_rules = (
-            ["+ */"] + [f"+ *.{ext}" for ext in VIDEO_EXTS] + ["- .*", "- *"]
-        )
+        filter_rules = ["+ */"] + [f"+ *.{ext}" for ext in VIDEO_EXTS] + ["- .*", "- *"]
         filter_str = " ".join([f'--filter "{r}"' for r in filter_rules])
         ok2, out2, _ = self._run_cmd(
             f"{self.rclone_path} --config {self.config_file} "
@@ -1072,7 +1261,8 @@ class TransferManager:
         )
         more = (
             f"\n  <i>…and {len(self.video_files)-7} more</i>"
-            if len(self.video_files) > 7 else ""
+            if len(self.video_files) > 7
+            else ""
         )
         self._edit(
             f"✅ <b>Scan Complete!</b>\n\n"
@@ -1098,11 +1288,18 @@ class TransferManager:
             r"([\d.]+)\s*(B|KB|KiB|MB|MiB|GB|GiB|TB|TiB)", size_str, re.IGNORECASE
         )
         if m:
-            val  = float(m.group(1))
+            val = float(m.group(1))
             unit = m.group(2).upper()
             mult = {
-                "B": 1, "KB": 1000, "KIB": 1024, "MB": 1000**2, "MIB": 1024**2,
-                "GB": 1000**3, "GIB": 1024**3, "TB": 1000**4, "TIB": 1024**4,
+                "B": 1,
+                "KB": 1000,
+                "KIB": 1024,
+                "MB": 1000**2,
+                "MIB": 1024**2,
+                "GB": 1000**3,
+                "GIB": 1024**3,
+                "TB": 1000**4,
+                "TIB": 1024**4,
             }
             return int(val * mult.get(unit, 1))
         m = re.search(r"\d+", size_str)
@@ -1148,17 +1345,18 @@ class TransferManager:
     #  Repeats until all files are confirmed on GDrive.
     # ══════════════════════════════════════════════════════════════════════════
 
-    _WEBDAV_PORT       = 18765
-    _MAX_RECONNECTS    = 20          # absolute ceiling on reconnect attempts
-    _SPEED_THRESHOLD   = 1024 * 1024 # 1 MB/s  — below this = throttled
-    _SLOW_TRIGGER_SECS = 20          # seconds below threshold before reconnect
-    _WEBDAV_READY_SECS = 20          # seconds to wait for WebDAV to come up
+    _WEBDAV_PORT = 18765
+    _MAX_RECONNECTS = 20  # absolute ceiling on reconnect attempts
+    _SPEED_THRESHOLD = 1024 * 1024  # 1 MB/s  — below this = throttled
+    _SLOW_TRIGGER_SECS = 20  # seconds below threshold before reconnect
+    _WEBDAV_READY_SECS = 20  # seconds to wait for WebDAV to come up
 
     def _kill_port(self):
         try:
             subprocess.run(
                 ["fuser", "-k", str(self._WEBDAV_PORT) + "/tcp"],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
         except Exception:
             pass
@@ -1171,12 +1369,18 @@ class TransferManager:
 
         log_path = f"/tmp/rclone_webdav_{self.user_id}.log"
         serve_cmd = [
-            self.rclone_path, "--config", self.config_file,
-            "serve", "webdav", "PIKKY:",
-            "--addr", f"127.0.0.1:{self._WEBDAV_PORT}",
+            self.rclone_path,
+            "--config",
+            self.config_file,
+            "serve",
+            "webdav",
+            "PIKKY:",
+            "--addr",
+            f"127.0.0.1:{self._WEBDAV_PORT}",
             "--read-only",
             "--no-modtime",
-            "--log-level", "ERROR",   # quieter — we only care about fatal errors
+            "--log-level",
+            "ERROR",  # quieter — we only care about fatal errors
         ]
         try:
             lfd = open(log_path, "w")
@@ -1198,8 +1402,9 @@ class TransferManager:
                 return None
             try:
                 import urllib.request as _ur
+
                 _ur.urlopen(f"http://127.0.0.1:{self._WEBDAV_PORT}", timeout=1)
-                return proc   # ready
+                return proc  # ready
             except Exception:
                 time.sleep(0.5)
 
@@ -1212,18 +1417,24 @@ class TransferManager:
         try:
             r = subprocess.run(
                 [
-                    self.rclone_path, "--config", self.config_file,
-                    "lsf", f"GDRIVE:{self.destination_folder}",
-                    "--recursive", "--files-only",
+                    self.rclone_path,
+                    "--config",
+                    self.config_file,
+                    "lsf",
+                    f"GDRIVE:{self.destination_folder}",
+                    "--recursive",
+                    "--files-only",
                 ],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             if r.returncode == 0:
                 paths = set()
                 for f in r.stdout.split("\n"):
                     f = f.strip()
                     if f:
-                        paths.add(f)                    # full: "My Pack/video.mp4"
+                        paths.add(f)  # full: "My Pack/video.mp4"
                         paths.add(os.path.basename(f))  # bare: "video.mp4"
                 return paths
         except Exception as e:
@@ -1240,37 +1451,54 @@ class TransferManager:
         args += ["--filter", "- *"]
         return args
 
-    def _start_copy_proc(self, filter_args: list) -> "tuple[subprocess.Popen | None, list, threading.Thread | None]":
+    def _start_copy_proc(
+        self, filter_args: list
+    ) -> "tuple[subprocess.Popen | None, list, threading.Thread | None]":
         """Spawn rclone copy WEBDAV_* → GDRIVE:dest with given filters.
         Returns (proc, stderr_lines_list, reader_thread)."""
 
         webdav_remote = f"PIKPAKDAV_{self.user_id}"
         copy_cmd = [
-            self.rclone_path, "--config", self.config_file,
+            self.rclone_path,
+            "--config",
+            self.config_file,
             "copy",
             f"{webdav_remote}:",
             f"GDRIVE:{self.destination_folder}",
-            "--transfers", "2",
-            "--checkers", "1",           # 1 checker = far fewer GDrive API list calls
+            "--transfers",
+            "2",
+            "--checkers",
+            "1",  # 1 checker = far fewer GDrive API list calls
             # --no-traverse + --ignore-existing removed:
             # Together they cause rclone to stat every destination file individually
             # (one API call per file) which instantly blows GDrive's 1000 req/100s quota.
             # Instead we rely on our own _gdrive_list_done() check between sessions
             # and pass --size-only so rclone uses a single cheap list pass.
-            "--size-only",               # skip hash checks — size match = done
-            "--drive-chunk-size", "64M", # smaller chunks = fewer bytes wasted on quota errors
+            "--size-only",  # skip hash checks — size match = done
+            "--drive-chunk-size",
+            "64M",  # smaller chunks = fewer bytes wasted on quota errors
             "--drive-acknowledge-abuse",
-            "--drive-pacer-min-sleep", "200ms",  # enforce gap between every GDrive API call
-            "--drive-pacer-burst", "5",           # allow 5 rapid calls max then pace
-            "--tpslimit", "3",                    # hard cap: 3 API transactions/sec
-            "--tpslimit-burst", "5",
-            "--buffer-size", "64M",
+            "--drive-pacer-min-sleep",
+            "200ms",  # enforce gap between every GDrive API call
+            "--drive-pacer-burst",
+            "5",  # allow 5 rapid calls max then pace
+            "--tpslimit",
+            "3",  # hard cap: 3 API transactions/sec
+            "--tpslimit-burst",
+            "5",
+            "--buffer-size",
+            "64M",
             "--use-mmap",
-            "--retries", "1",
-            "--low-level-retries", "3",
-            "--timeout", "120s",
-            "--contimeout", "30s",
-            "--log-level", "INFO",
+            "--retries",
+            "1",
+            "--low-level-retries",
+            "3",
+            "--timeout",
+            "120s",
+            "--contimeout",
+            "30s",
+            "--log-level",
+            "INFO",
         ] + filter_args
 
         stderr_lines: list[str] = []
@@ -1349,8 +1577,8 @@ class TransferManager:
         self._ensure_webdav_remote_in_config()
 
         # Full list of files we need to transfer
-        remaining = list(self.video_files)   # files still to transfer
-        done_basenames: set[str] = set()     # confirmed on GDrive
+        remaining = list(self.video_files)  # files still to transfer
+        done_basenames: set[str] = set()  # confirmed on GDrive
 
         for reconnect_idx in range(self._MAX_RECONNECTS + 1):
             if self._kill_evt.is_set() or self.stop_requested:
@@ -1395,15 +1623,16 @@ class TransferManager:
                 self.transfer_process = copy_proc
 
             # ── Speed watchdog loop ───────────────────────────────────────
-            slow_seconds   = 0      # consecutive seconds below threshold
-            last_up_bytes  = self.network_monitor.total_uploaded
-            reconnect_now  = False
+            slow_seconds = 0  # consecutive seconds below threshold
+            last_up_bytes = self.network_monitor.total_uploaded
+            reconnect_now = False
 
             while True:
                 if self._kill_evt.is_set() or self.stop_requested:
                     self._kill_process(copy_proc)
                     self._kill_process(webdav_proc)
-                    if err_thr: err_thr.join(timeout=2)
+                    if err_thr:
+                        err_thr.join(timeout=2)
                     with self.process_lock:
                         self.transfer_process = None
                     return False
@@ -1415,7 +1644,7 @@ class TransferManager:
                 time.sleep(1)
 
                 cur_up = self.network_monitor.total_uploaded
-                delta  = cur_up - last_up_bytes
+                delta = cur_up - last_up_bytes
                 last_up_bytes = cur_up
 
                 # Speed in B/s over this 1-second window
@@ -1424,7 +1653,7 @@ class TransferManager:
                 if speed_bps < self._SPEED_THRESHOLD:
                     slow_seconds += 1
                 else:
-                    slow_seconds = 0   # reset — speed is fine
+                    slow_seconds = 0  # reset — speed is fine
 
                 if slow_seconds >= self._SLOW_TRIGGER_SECS:
                     self.warn(
@@ -1436,7 +1665,8 @@ class TransferManager:
                     break
 
             # ── rclone exited (finished or killed) ────────────────────────
-            if err_thr: err_thr.join(timeout=5)
+            if err_thr:
+                err_thr.join(timeout=5)
             rc = copy_proc.returncode if copy_proc.poll() is not None else -1
 
             with self.process_lock:
@@ -1453,7 +1683,8 @@ class TransferManager:
 
             # Update files_done counter for UI — never go backwards
             confirmed = sum(
-                1 for f in self.video_files
+                1
+                for f in self.video_files
                 if f in done_basenames or os.path.basename(f) in done_basenames
             )
             if confirmed > self.files_done:
@@ -1462,9 +1693,9 @@ class TransferManager:
             # Rebuild remaining = files NOT yet confirmed on GDrive
             # Match against both full relative path and bare basename
             remaining = [
-                f for f in self.video_files
-                if f not in done_basenames
-                and os.path.basename(f) not in done_basenames
+                f
+                for f in self.video_files
+                if f not in done_basenames and os.path.basename(f) not in done_basenames
             ]
 
             self.ok(
@@ -1482,10 +1713,22 @@ class TransferManager:
             err_tail = "\n".join(stderr_lines[-8:]).lower()
 
             FATAL_ERRORS = [
-                ("storagequotaexceeded",  "❌ <b>Google Drive Full</b>\n\nYour GDrive storage quota is exceeded.\n\n💡 Free up space at <a href='https://drive.google.com'>drive.google.com</a> then retry."),
-                ("invalidcredentials",    "❌ <b>GDrive Auth Failed</b>\n\nCredentials expired.\n\n💡 Re-run /config with a fresh rclone config."),
-                ("autherror",             "❌ <b>GDrive Auth Failed</b>\n\nCredentials expired.\n\n💡 Re-run /config with a fresh rclone config."),
-                ("tokenerror",            "❌ <b>GDrive Token Error</b>\n\nRe-run /config to refresh your GDrive token."),
+                (
+                    "storagequotaexceeded",
+                    "❌ <b>Google Drive Full</b>\n\nYour GDrive storage quota is exceeded.\n\n💡 Free up space at <a href='https://drive.google.com'>drive.google.com</a> then retry.",
+                ),
+                (
+                    "invalidcredentials",
+                    "❌ <b>GDrive Auth Failed</b>\n\nCredentials expired.\n\n💡 Re-run /config with a fresh rclone config.",
+                ),
+                (
+                    "autherror",
+                    "❌ <b>GDrive Auth Failed</b>\n\nCredentials expired.\n\n💡 Re-run /config with a fresh rclone config.",
+                ),
+                (
+                    "tokenerror",
+                    "❌ <b>GDrive Token Error</b>\n\nRe-run /config to refresh your GDrive token.",
+                ),
             ]
 
             fatal_msg = None
@@ -1500,7 +1743,11 @@ class TransferManager:
                 return False
 
             # GDrive rate limit — wait 90s then retry (quota window = 100s)
-            is_rate_limit = "ratelimitexceeded" in err_tail or "rate limit" in err_tail or "userratelimitexceeded" in err_tail
+            is_rate_limit = (
+                "ratelimitexceeded" in err_tail
+                or "rate limit" in err_tail
+                or "userratelimitexceeded" in err_tail
+            )
             if is_rate_limit:
                 wait_secs = 90
                 self.warn(f"GDrive rate limit — waiting {wait_secs}s before retry")
@@ -1549,7 +1796,9 @@ class TransferManager:
                 continue
 
             # Any other non-zero exit — still reconnect if files remain
-            self.warn(f"rclone rc={rc}, {len(remaining)} files still missing — reconnecting")
+            self.warn(
+                f"rclone rc={rc}, {len(remaining)} files still missing — reconnecting"
+            )
             self.reconnect_count += 1
             raw_tail = "\n".join(stderr_lines[-4:])
             if raw_tail:
@@ -1568,7 +1817,7 @@ class TransferManager:
         self.network_monitor.stop()
 
     def _status_loop(self):
-        STATUS_INTERVAL  = 15.0
+        STATUS_INTERVAL = 15.0
         MAX_CONSEC_FAILS = 3
         consec_fails = 0
         while self.transfer_in_progress and not self.stop_requested:
@@ -1597,11 +1846,15 @@ class TransferManager:
         speed = "0 B/s"
 
         try:
-            self.head(f"PikPak→GDrive | User {self.user_id} | {fmt_dt(self.start_time)}")
+            self.head(
+                f"PikPak→GDrive | User {self.user_id} | {fmt_dt(self.start_time)}"
+            )
 
             if not self._install_rclone():
                 error_msg = "rclone install failed"
-                self._edit("❌ <b>Setup Failed</b>\n\nCouldn't install rclone. Try again.")
+                self._edit(
+                    "❌ <b>Setup Failed</b>\n\nCouldn't install rclone. Try again."
+                )
                 return
 
             self._write_config()
@@ -1652,10 +1905,15 @@ class TransferManager:
             )
             elapsed_secs = (
                 (datetime.now() - self.network_monitor.start_time).total_seconds()
-                if self.network_monitor.start_time else 0
+                if self.network_monitor.start_time
+                else 0
             )
             active_secs = max(elapsed_secs - 10, 1)
-            avg_bps = self.network_monitor.total_uploaded / active_secs if elapsed_secs > 0 else 0
+            avg_bps = (
+                self.network_monitor.total_uploaded / active_secs
+                if elapsed_secs > 0
+                else 0
+            )
             avg_speed = NetworkMonitor._fmt_speed(avg_bps)
             speed = avg_speed
 
@@ -1675,7 +1933,8 @@ class TransferManager:
                 duration = str(datetime.now() - self.start_time).split(".")[0]
                 reconnect_note = (
                     f"\n🔁  Reconnects  <b>{self.reconnect_count}</b>"
-                    if self.reconnect_count > 0 else ""
+                    if self.reconnect_count > 0
+                    else ""
                 )
                 self._edit(
                     "🎉 <b>Transfer Complete!</b>\n\n"
@@ -1703,13 +1962,19 @@ class TransferManager:
                     f"·  <b>{self.files_done}</b> completed\n"
                     f"🔁  Reconnects <b>{self.reconnect_count}</b>\n"
                     f"{DIVIDER_SM}\n\n"
-                    + (f"<code>{safe_escape(last_err[-200:])}</code>" if last_err else "")
+                    + (
+                        f"<code>{safe_escape(last_err[-200:])}</code>"
+                        if last_err
+                        else ""
+                    )
                 )
 
         except Exception as e:
             self.err(f"Unexpected: {e}")
             error_msg = str(e)
-            self._edit(f"❌ <b>Unexpected Error</b>\n\n<code>{safe_escape(str(e))}</code>")
+            self._edit(
+                f"❌ <b>Unexpected Error</b>\n\n<code>{safe_escape(str(e))}</code>"
+            )
         finally:
             self.transfer_in_progress = False
             try:
@@ -1717,9 +1982,16 @@ class TransferManager:
             except:
                 pass
             UserManager.save_transfer(
-                self.user_id, status, self.start_time, datetime.now(),
-                self.destination_folder, len(self.video_files), self.total_size_str,
-                transferred_size, speed, error_msg,
+                self.user_id,
+                status,
+                self.start_time,
+                datetime.now(),
+                self.destination_folder,
+                len(self.video_files),
+                self.total_size_str,
+                transferred_size,
+                speed,
+                error_msg,
             )
 
 
@@ -1772,12 +2044,12 @@ def run_rclone(rclone_path, config_file, *args, timeout=120):
 
 # . ─── Help & Guide Content ─────────────────────────────────────────────────────
 
-GDRIVE_BINARY_LINK  = "https://drive.google.com/file/d/1ti94G9SFsLec2zMn08RoQ5EhgGVJoDiA/view?usp=drivesdk"
-GDRIVE_DIRECT_DL    = "https://drive.google.com/uc?export=download&id=1ti94G9SFsLec2zMn08RoQ5EhgGVJoDiA&confirm=t"
+GDRIVE_BINARY_LINK = "https://drive.google.com/file/d/1ti94G9SFsLec2zMn08RoQ5EhgGVJoDiA/view?usp=drivesdk"
+GDRIVE_DIRECT_DL = "https://drive.google.com/uc?export=download&id=1ti94G9SFsLec2zMn08RoQ5EhgGVJoDiA&confirm=t"
 
 
 def _home_text(user_id: int) -> str:
-    config_ok  = UserManager.get_config(user_id) is not None
+    config_ok = UserManager.get_config(user_id) is not None
     api_active = _using_local_api
     config_badge = "🟢 Config saved" if config_ok else "❌ No config — use /config"
     api_badge = (
@@ -1893,16 +2165,34 @@ GUIDE_PAGES = {
 
 def _guide_kb(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("⚙️ rclone config",    callback_data=f"guide_rclone_{user_id}"))
-    kb.row(InlineKeyboardButton("🖥 Local API binary",  callback_data=f"guide_binary_{user_id}"))
-    kb.row(InlineKeyboardButton("🚀 Running transfers", callback_data=f"guide_transfer_{user_id}"))
-    kb.row(InlineKeyboardButton("🛡 Fix PikPak captcha",callback_data=f"guide_captcha_{user_id}"))
+    kb.row(
+        InlineKeyboardButton("⚙️ rclone config", callback_data=f"guide_rclone_{user_id}")
+    )
+    kb.row(
+        InlineKeyboardButton(
+            "🖥 Local API binary", callback_data=f"guide_binary_{user_id}"
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            "🚀 Running transfers", callback_data=f"guide_transfer_{user_id}"
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            "🛡 Fix PikPak captcha", callback_data=f"guide_captcha_{user_id}"
+        )
+    )
     return kb
 
 
 def _back_kb(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("« Back to guide menu", callback_data=f"guide_menu_{user_id}"))
+    kb.row(
+        InlineKeyboardButton(
+            "« Back to guide menu", callback_data=f"guide_menu_{user_id}"
+        )
+    )
     return kb
 
 
@@ -1920,7 +2210,7 @@ def cmd_start(message: Message):
             None,
         )
     text = _home_text(user_id)
-    kb   = _guide_kb(user_id)
+    kb = _guide_kb(user_id)
     MsgStore.delete_msg(user_id, "home")
     sent = send_msg(message.chat.id, text, reply_markup=kb, parse_mode="HTML")
     if sent:
@@ -1932,8 +2222,10 @@ def cmd_guide(message: Message):
     user_id = message.from_user.id
     MsgStore.delete_msg(user_id, "guide")
     sent = send_msg(
-        message.chat.id, _guide_menu_text(),
-        reply_markup=_guide_kb(user_id), parse_mode="HTML",
+        message.chat.id,
+        _guide_menu_text(),
+        reply_markup=_guide_kb(user_id),
+        parse_mode="HTML",
     )
     if sent:
         MsgStore.save(user_id, "guide", message.chat.id, sent.message_id)
@@ -1942,10 +2234,16 @@ def cmd_guide(message: Message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("guide_menu_"))
 def cb_guide_menu(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id)
-    except: pass
-    edit_msg(call.message.chat.id, call.message.message_id,
-             _guide_menu_text(), reply_markup=_guide_kb(user_id))
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        _guide_menu_text(),
+        reply_markup=_guide_kb(user_id),
+    )
     MsgStore.save(user_id, "guide", call.message.chat.id, call.message.message_id)
 
 
@@ -1953,14 +2251,21 @@ def cb_guide_menu(call: CallbackQuery):
     func=lambda c: c.data.startswith("guide_") and not c.data.startswith("guide_menu_")
 )
 def cb_guide(call: CallbackQuery):
-    parts   = call.data.split("_")
-    topic   = parts[1]
+    parts = call.data.split("_")
+    topic = parts[1]
     user_id = int(parts[2])
-    text    = GUIDE_PAGES.get(topic, "❓ Unknown topic.")
-    try: bot.answer_callback_query(call.id)
-    except: pass
-    edit_msg(call.message.chat.id, call.message.message_id, text,
-             reply_markup=_back_kb(user_id), parse_mode="HTML")
+    text = GUIDE_PAGES.get(topic, "❓ Unknown topic.")
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        text,
+        reply_markup=_back_kb(user_id),
+        parse_mode="HTML",
+    )
 
 
 # * ─── /config ──────────────────────────────────────────────────────────────────
@@ -1980,7 +2285,9 @@ def cmd_config(message: Message):
         "Send /cancel to abort.",
     )
     if sent:
-        MsgStore.save(message.from_user.id, "config_prompt", message.chat.id, sent.message_id)
+        MsgStore.save(
+            message.from_user.id, "config_prompt", message.chat.id, sent.message_id
+        )
         bot.register_next_step_handler(sent, _process_config)
 
 
@@ -1994,23 +2301,29 @@ def _process_config(message: Message):
         if message.content_type == "text":
             config = (message.text or "").strip()
             if not config:
-                sent = send_msg(message.chat.id, "❌ Config is empty. Send again or /cancel.")
-                if sent: bot.register_next_step_handler(sent, _process_config)
+                sent = send_msg(
+                    message.chat.id, "❌ Config is empty. Send again or /cancel."
+                )
+                if sent:
+                    bot.register_next_step_handler(sent, _process_config)
                 return
         elif message.content_type == "document":
             import urllib.request as _ur, json as _json
+
             fid = message.document.file_id
-            r   = _ur.urlopen(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={fid}", timeout=15
+            r = _ur.urlopen(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={fid}",
+                timeout=15,
             )
-            fp  = _json.loads(r.read())["result"]["file_path"]
+            fp = _json.loads(r.read())["result"]["file_path"]
             with _ur.urlopen(
                 f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}", timeout=30
             ) as resp:
                 config = resp.read().decode("utf-8").strip()
         else:
             sent = send_msg(message.chat.id, "❌ Send config as text or .conf file.")
-            if sent: bot.register_next_step_handler(sent, _process_config)
+            if sent:
+                bot.register_next_step_handler(sent, _process_config)
             return
 
         if "[PIKKY]" not in config or "[GDRIVE]" not in config:
@@ -2020,7 +2333,8 @@ def _process_config(message: Message):
                 "Must contain both <code>[PIKKY]</code> and <code>[GDRIVE]</code> sections.\n\n"
                 "Send the correct one or use /guide for help.",
             )
-            if sent: bot.register_next_step_handler(sent, _process_config)
+            if sent:
+                bot.register_next_step_handler(sent, _process_config)
             return
 
         UserManager.save_user(
@@ -2043,7 +2357,8 @@ def _process_config(message: Message):
             message.chat.id,
             f"❌ Error saving config: <code>{safe_escape(str(e))}</code>\n\nTry /config again.",
         )
-        if sent: bot.register_next_step_handler(sent, _process_config)
+        if sent:
+            bot.register_next_step_handler(sent, _process_config)
 
 
 #! ─── /upload ──────────────────────────────────────────────────────────────────
@@ -2056,7 +2371,11 @@ def cmd_upload(message: Message):
         bot.reply_to(message, "❌ No config. Use /config first.", parse_mode="HTML")
         return
     if user_id in managers and managers[user_id].transfer_in_progress:
-        bot.reply_to(message, "⚠️ Transfer already running.\n\nUse /status or /stop.", parse_mode="HTML")
+        bot.reply_to(
+            message,
+            "⚠️ Transfer already running.\n\nUse /status or /stop.",
+            parse_mode="HTML",
+        )
         return
     try:
         mgr = TransferManager(user_id, message.chat.id)
@@ -2129,15 +2448,23 @@ def cb_refresh(call: CallbackQuery):
     user_id = int(call.data.split("_")[1])
     mgr = managers.get(user_id)
     if not mgr or not mgr.transfer_in_progress:
-        try: bot.answer_callback_query(call.id, "No active transfer.", show_alert=True)
-        except: pass
+        try:
+            bot.answer_callback_query(call.id, "No active transfer.", show_alert=True)
+        except:
+            pass
         return
     ok = edit_msg(
-        call.message.chat.id, call.message.message_id,
-        mgr.render_status("transferring"), reply_markup=mgr._live_kb(),
+        call.message.chat.id,
+        call.message.message_id,
+        mgr.render_status("transferring"),
+        reply_markup=mgr._live_kb(),
     )
-    try: bot.answer_callback_query(call.id, "✅ Refreshed!" if ok else "Already up to date.")
-    except: pass
+    try:
+        bot.answer_callback_query(
+            call.id, "✅ Refreshed!" if ok else "Already up to date."
+        )
+    except:
+        pass
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("stop_"))
@@ -2145,21 +2472,27 @@ def cb_stop(call: CallbackQuery):
     user_id = int(call.data.split("_")[1])
     mgr = managers.get(user_id)
     if not mgr or not mgr.transfer_in_progress:
-        try: bot.answer_callback_query(call.id, "No active transfer.", show_alert=True)
-        except: pass
+        try:
+            bot.answer_callback_query(call.id, "No active transfer.", show_alert=True)
+        except:
+            pass
         try:
             bot.edit_message_reply_markup(
                 call.message.chat.id, call.message.message_id, reply_markup=None
             )
-        except: pass
+        except:
+            pass
         return
     ns = mgr.network_monitor.get_stats()
     mgr.stop()
     mgr.status_msg_id = None
-    try: bot.answer_callback_query(call.id, "⏹  Stopped.")
-    except: pass
+    try:
+        bot.answer_callback_query(call.id, "⏹  Stopped.")
+    except:
+        pass
     edit_msg(
-        call.message.chat.id, call.message.message_id,
+        call.message.chat.id,
+        call.message.message_id,
         "⏹  <b>Transfer Cancelled</b>\n\n"
         f"{DIVIDER_SM}\n"
         f"📤  Uploaded   <b>{ns['total_uploaded']}</b>\n"
@@ -2215,25 +2548,35 @@ def _build_localapi_text_and_kb(user_id: int):
     )
 
     kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton(
-        "📖 How to get credentials", callback_data=f"localapi_guide_{user_id}"
-    ))
-    kb.row(InlineKeyboardButton(
-        "⬇️ Download binary from URL", callback_data=f"localapi_dlbin_{user_id}"
-    ))
+    kb.row(
+        InlineKeyboardButton(
+            "📖 How to get credentials", callback_data=f"localapi_guide_{user_id}"
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            "⬇️ Download binary from URL", callback_data=f"localapi_dlbin_{user_id}"
+        )
+    )
     if os.path.isfile(LOCAL_API_BIN):
-        kb.row(InlineKeyboardButton(
-            "🔑 Enter / Update credentials",
-            callback_data=f"localapi_enter_{user_id}",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                "🔑 Enter / Update credentials",
+                callback_data=f"localapi_enter_{user_id}",
+            )
+        )
     if api_id and api_hash and os.path.isfile(LOCAL_API_BIN) and not _using_local_api:
-        kb.row(InlineKeyboardButton(
-            "▶ Start Local API now", callback_data=f"localapi_start_{user_id}"
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                "▶ Start Local API now", callback_data=f"localapi_start_{user_id}"
+            )
+        )
     if _using_local_api:
-        kb.row(InlineKeyboardButton(
-            "🔄 Restart Local API", callback_data=f"localapi_start_{user_id}"
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                "🔄 Restart Local API", callback_data=f"localapi_start_{user_id}"
+            )
+        )
     return text, kb
 
 
@@ -2250,29 +2593,47 @@ def cmd_localapi(message: Message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_guide_"))
 def cb_localapi_guide(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id)
-    except: pass
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     back_kb = InlineKeyboardMarkup()
-    back_kb.row(InlineKeyboardButton("« Back", callback_data=f"localapi_back_{user_id}"))
-    edit_msg(call.message.chat.id, call.message.message_id,
-             _GUIDE_TEXT, reply_markup=back_kb, parse_mode="HTML")
+    back_kb.row(
+        InlineKeyboardButton("« Back", callback_data=f"localapi_back_{user_id}")
+    )
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        _GUIDE_TEXT,
+        reply_markup=back_kb,
+        parse_mode="HTML",
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_back_"))
 def cb_localapi_back(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id)
-    except: pass
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     text, kb = _build_localapi_text_and_kb(user_id)
-    edit_msg(call.message.chat.id, call.message.message_id,
-             text, reply_markup=kb, parse_mode="HTML")
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        text,
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_dlbin_"))
 def cb_localapi_dlbin(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id)
-    except: pass
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     sent = send_msg(
         call.message.chat.id,
         "⬇️ <b>Download telegram-bot-api binary</b>\n\n"
@@ -2295,15 +2656,17 @@ def _gdrive_direct_url(share_url: str) -> str:
     return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
 
 
-def _download_binary(url: str, dest_path: str, status_msg_id: int, chat_id: int) -> bool:
+def _download_binary(
+    url: str, dest_path: str, status_msg_id: int, chat_id: int
+) -> bool:
     if "drive.google.com" in url:
         url = _gdrive_direct_url(url)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            total      = int(resp.headers.get("Content-Length", 0))
+            total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            last_edit  = 0
+            last_edit = 0
             os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
             with open(dest_path, "wb") as out:
                 while True:
@@ -2317,7 +2680,8 @@ def _download_binary(url: str, dest_path: str, status_msg_id: int, chat_id: int)
                         pct = int(100 * downloaded / total)
                         bar = make_bar(int(BAR_DL * downloaded / total), BAR_DL)
                         edit_msg(
-                            chat_id, status_msg_id,
+                            chat_id,
+                            status_msg_id,
                             f"⬇️ <b>Downloading binary…</b>\n\n"
                             f"<code>[{bar}]</code>  {pct}%\n"
                             f"{fmt_size(downloaded)} / {fmt_size(total)}",
@@ -2332,8 +2696,10 @@ def _download_binary(url: str, dest_path: str, status_msg_id: int, chat_id: int)
         return True
     except Exception as e:
         print(f"[dlbin] {e}")
-        try: os.remove(dest_path)
-        except: pass
+        try:
+            os.remove(dest_path)
+        except:
+            pass
         return False
 
 
@@ -2342,20 +2708,26 @@ def _localapi_dlbin_receive(message: Message, user_id: int):
         bot.reply_to(message, "❌ Cancelled.")
         return
     chat_id = message.chat.id
-    dest    = os.path.join(SCRIPT_DIR, "telegram-bot-api")
+    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
 
     if message.content_type == "document":
-        status = bot.reply_to(message, "⬇️ <b>Downloading uploaded file…</b>", parse_mode="HTML")
+        status = bot.reply_to(
+            message, "⬇️ <b>Downloading uploaded file…</b>", parse_mode="HTML"
+        )
         try:
             import json as _json
+
             fid = message.document.file_id
-            r   = urllib.request.urlopen(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={fid}", timeout=15
+            r = urllib.request.urlopen(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={fid}",
+                timeout=15,
             )
-            fp  = _json.loads(r.read())["result"]["file_path"]
-            ok  = _download_binary(
+            fp = _json.loads(r.read())["result"]["file_path"]
+            ok = _download_binary(
                 f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}",
-                dest, status.message_id, chat_id,
+                dest,
+                status.message_id,
+                chat_id,
             )
         except Exception as e:
             ok = False
@@ -2376,7 +2748,9 @@ def _localapi_dlbin_receive(message: Message, user_id: int):
     status = bot.reply_to(message, "⬇️ <b>Starting download…</b>", parse_mode="HTML")
     threading.Thread(
         target=lambda: _finish_binary_download(
-            chat_id, user_id, status.message_id,
+            chat_id,
+            user_id,
+            status.message_id,
             _download_binary(url, dest, status.message_id, chat_id),
             dest,
         ),
@@ -2388,14 +2762,16 @@ def _finish_binary_download(chat_id, user_id, status_msg_id, ok, dest):
     global LOCAL_API_BIN
     if not ok:
         edit_msg(
-            chat_id, status_msg_id,
+            chat_id,
+            status_msg_id,
             "❌ <b>Download failed.</b>\n\nCheck the link and try again via /localapi.",
         )
         return
     LOCAL_API_BIN = dest
     size = os.path.getsize(dest)
     edit_msg(
-        chat_id, status_msg_id,
+        chat_id,
+        status_msg_id,
         f"✅ <b>Binary downloaded!</b>\n\n"
         f"📁  <code>{safe_escape(dest)}</code>\n"
         f"💾  {fmt_size(size)}\n\n"
@@ -2404,17 +2780,23 @@ def _finish_binary_download(chat_id, user_id, status_msg_id, ok, dest):
     api_id, api_hash = UserManager.get_api_credentials(user_id)
     if api_id and api_hash:
         kb = InlineKeyboardMarkup()
-        kb.row(InlineKeyboardButton(
-            "▶ Start Local API now", callback_data=f"localapi_start_{user_id}"
-        ))
-        send_msg(chat_id, "🔑 Credentials already saved. Start the server?", reply_markup=kb)
+        kb.row(
+            InlineKeyboardButton(
+                "▶ Start Local API now", callback_data=f"localapi_start_{user_id}"
+            )
+        )
+        send_msg(
+            chat_id, "🔑 Credentials already saved. Start the server?", reply_markup=kb
+        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_enter_"))
 def cb_localapi_enter(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id)
-    except: pass
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     sent = send_msg(
         call.message.chat.id,
         "🔑 <b>Step 1 of 2 — API ID</b>\n\n"
@@ -2477,11 +2859,12 @@ def _localapi_step2_api_hash(message: Message, user_id: int, api_id: str):
 
 def _restart_local_api_with_creds(chat_id, user_id, api_id, api_hash):
     global _using_local_api
+    import telebot.apihelper as _ah
+
     stop_local_api()
     time.sleep(1)
     success = start_local_api(BOT_TOKEN, api_id=api_id, api_hash=api_hash)
     if success:
-        import telebot.apihelper as _ah
         _ah.API_URL = f"http://127.0.0.1:{LOCAL_API_PORT}/bot{{0}}/{{1}}"
         _using_local_api = True
         send_msg(
@@ -2493,11 +2876,13 @@ def _restart_local_api_with_creds(chat_id, user_id, api_id, api_hash):
             "Use /sendfiles to receive large video files.",
         )
     else:
+        # Ensure we're fully back on official API if local failed
+        _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
         _using_local_api = False
         log_file = os.path.join(SCRIPT_DIR, "tg_api_data", "server.log")
         try:
             tail = open(log_file).read()[-600:].strip()
-        except:
+        except Exception:
             tail = "(no log)"
         send_msg(
             chat_id,
@@ -2509,11 +2894,16 @@ def _restart_local_api_with_creds(chat_id, user_id, api_id, api_hash):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_start_"))
 def cb_localapi_start(call: CallbackQuery):
     user_id = int(call.data.split("_")[-1])
-    try: bot.answer_callback_query(call.id, "▶ Starting…")
-    except: pass
+    try:
+        bot.answer_callback_query(call.id, "▶ Starting…")
+    except:
+        pass
     api_id, api_hash = UserManager.get_api_credentials(user_id)
     if not api_id or not api_hash:
-        send_msg(call.message.chat.id, "❌ No credentials. Use /localapi → Enter credentials first.")
+        send_msg(
+            call.message.chat.id,
+            "❌ No credentials. Use /localapi → Enter credentials first.",
+        )
         return
     send_msg(call.message.chat.id, "⏳ Starting local Bot API server…")
     threading.Thread(
@@ -2528,8 +2918,8 @@ def cb_localapi_start(call: CallbackQuery):
 
 @bot.message_handler(commands=["settings"])
 def cmd_settings(message: Message):
-    user_id  = message.from_user.id
-    send_as  = UserManager.get_settings(user_id).get("send_as", "video")
+    user_id = message.from_user.id
+    send_as = UserManager.get_settings(user_id).get("send_as", "video")
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton(
@@ -2558,9 +2948,9 @@ def cmd_settings(message: Message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("set_sendas_"))
 def cb_set_sendas(call: CallbackQuery):
-    parts   = call.data.split("_")
+    parts = call.data.split("_")
     user_id = int(parts[2])
-    value   = parts[3]
+    value = parts[3]
     UserManager.set_setting(user_id, "send_as", value)
     kb = InlineKeyboardMarkup()
     kb.row(
@@ -2573,10 +2963,18 @@ def cb_set_sendas(call: CallbackQuery):
             callback_data=f"set_sendas_{user_id}_document",
         ),
     )
-    try: bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
-    except: pass
-    try: bot.answer_callback_query(call.id, f"🟢 {'🎬 Video' if value=='video' else '📄 Document'}")
-    except: pass
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id, call.message.message_id, reply_markup=kb
+        )
+    except:
+        pass
+    try:
+        bot.answer_callback_query(
+            call.id, f"🟢 {'🎬 Video' if value=='video' else '📄 Document'}"
+        )
+    except:
+        pass
 
 
 # * ─── /drive ───────────────────────────────────────────────────────────────────
@@ -2591,16 +2989,24 @@ def cmd_drive(message: Message):
     smart_send_or_edit(user_id, "drive", message.chat.id, "🔍 Fetching GDrive stats…")
     ok, out, err = run_rclone(rclone, cfg, "about", "GDRIVE:")
     if not ok:
-        smart_send_or_edit(user_id, "drive", message.chat.id, f"❌ Failed: {safe_escape(err)}")
+        smart_send_or_edit(
+            user_id, "drive", message.chat.id, f"❌ Failed: {safe_escape(err)}"
+        )
         return
     total = used = free = trash = "Unknown"
     for line in out.split("\n"):
-        if line.startswith("Total:"):    total = line.split(":", 1)[1].strip()
-        elif line.startswith("Used:"):   used  = line.split(":", 1)[1].strip()
-        elif line.startswith("Free:"):   free  = line.split(":", 1)[1].strip()
-        elif line.startswith("Trashed:"): trash = line.split(":", 1)[1].strip()
+        if line.startswith("Total:"):
+            total = line.split(":", 1)[1].strip()
+        elif line.startswith("Used:"):
+            used = line.split(":", 1)[1].strip()
+        elif line.startswith("Free:"):
+            free = line.split(":", 1)[1].strip()
+        elif line.startswith("Trashed:"):
+            trash = line.split(":", 1)[1].strip()
     smart_send_or_edit(
-        user_id, "drive", message.chat.id,
+        user_id,
+        "drive",
+        message.chat.id,
         "💾 <b>Google Drive Storage</b>\n\n"
         f"{DIVIDER_SM}\n"
         f"🔵  Total    <b>{total}</b>\n"
@@ -2621,22 +3027,28 @@ def cmd_drivvy(message: Message):
         return
     MsgStore.delete_msg(user_id, "drivvy")
     loading = send_msg(message.chat.id, "📁 Listing GDrive contents…")
-    ok, out, err = run_rclone(rclone, cfg, "lsf", "GDRIVE:", "--recursive", "--files-only", timeout=300)
+    ok, out, err = run_rclone(
+        rclone, cfg, "lsf", "GDRIVE:", "--recursive", "--files-only", timeout=300
+    )
     if not ok:
-        if loading: edit_msg(message.chat.id, loading.message_id, f"❌ Failed: {safe_escape(err)}")
+        if loading:
+            edit_msg(
+                message.chat.id, loading.message_id, f"❌ Failed: {safe_escape(err)}"
+            )
         return
     files = [f for f in out.split("\n") if f.strip()]
     if not files:
-        if loading: edit_msg(message.chat.id, loading.message_id, "📁 GDrive is empty.")
+        if loading:
+            edit_msg(message.chat.id, loading.message_id, "📁 GDrive is empty.")
         return
-    file_lines  = [f"📄 <code>{safe_escape(f)}</code>" for f in files]
-    total       = len(file_lines)
+    file_lines = [f"📄 <code>{safe_escape(f)}</code>" for f in files]
+    total = len(file_lines)
     pages, current_lines, current_len = [], [], 0
     for line in file_lines:
         if current_len + len(line) + 1 > 3800:
             pages.append(current_lines)
             current_lines = [line]
-            current_len   = len(line)
+            current_len = len(line)
         else:
             current_lines.append(line)
             current_len += len(line) + 1
@@ -2645,8 +3057,8 @@ def cmd_drivvy(message: Message):
     total_parts = len(pages)
     for i, page_lines in enumerate(pages):
         part_num = i + 1
-        header   = f"📁 <b>GDrive Contents</b>  ({part_num}/{total_parts})  <i>{total} files</i>\n\n"
-        body     = "\n".join(page_lines)
+        header = f"📁 <b>GDrive Contents</b>  ({part_num}/{total_parts})  <i>{total} files</i>\n\n"
+        body = "\n".join(page_lines)
         if i == 0 and loading:
             edit_msg(message.chat.id, loading.message_id, header + body)
         else:
@@ -2669,9 +3081,12 @@ def cmd_pikky(message: Message):
     if ok:
         total = used = free = "Unknown"
         for line in out.split("\n"):
-            if line.startswith("Total:"): total = line.split(":", 1)[1].strip()
-            elif line.startswith("Used:"): used  = line.split(":", 1)[1].strip()
-            elif line.startswith("Free:"): free  = line.split(":", 1)[1].strip()
+            if line.startswith("Total:"):
+                total = line.split(":", 1)[1].strip()
+            elif line.startswith("Used:"):
+                used = line.split(":", 1)[1].strip()
+            elif line.startswith("Free:"):
+                free = line.split(":", 1)[1].strip()
         storage_text = (
             f"📊 <b>PikPak Storage</b>\n\n{DIVIDER_SM}\n"
             f"🔵  Total  <b>{total}</b>\n"
@@ -2680,14 +3095,16 @@ def cmd_pikky(message: Message):
         )
     else:
         storage_text = f"⚠️ Storage unavailable: {safe_escape(err)}"
-    ok2, out2, _ = run_rclone(rclone, cfg, "lsf", "PIKKY:", "--recursive", "--files-only", timeout=300)
+    ok2, out2, _ = run_rclone(
+        rclone, cfg, "lsf", "PIKKY:", "--recursive", "--files-only", timeout=300
+    )
     if ok2:
         all_files = [f for f in out2.split("\n") if f.strip()]
-        videos    = [f for f in all_files if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS]
+        videos = [f for f in all_files if f.rsplit(".", 1)[-1].lower() in VIDEO_EXTS]
         if videos:
             preview_lines = [f"🎬 <code>{safe_escape(v)}</code>" for v in videos[:8]]
-            preview  = "\n".join(preview_lines)
-            more     = f"\n<i>…and {len(videos)-8} more</i>" if len(videos) > 8 else ""
+            preview = "\n".join(preview_lines)
+            more = f"\n<i>…and {len(videos)-8} more</i>" if len(videos) > 8 else ""
             video_text = f"\n\n🎬 <b>Videos: {len(videos)} found</b>\n\n{preview}{more}"
         else:
             video_text = "\n\n🎬 No video files found."
@@ -2710,16 +3127,22 @@ def cmd_sendfiles(message: Message):
     if not rclone:
         return
     transfers = UserManager.get_transfers(user_id, limit=5)
-    completed = [t for t in transfers if t["status"] == "completed" and t["destination_folder"]]
+    completed = [
+        t for t in transfers if t["status"] == "completed" and t["destination_folder"]
+    ]
     if not completed:
-        bot.reply_to(message, "⚠️ No completed transfers found.\n\nRun /upload first.", parse_mode="HTML")
+        bot.reply_to(
+            message,
+            "⚠️ No completed transfers found.\n\nRun /upload first.",
+            parse_mode="HTML",
+        )
         return
     kb = InlineKeyboardMarkup()
     for t in completed[:5]:
         folder = t["destination_folder"]
-        label  = f"📁 {folder[:35]}…" if len(folder) > 35 else f"📁 {folder}"
+        label = f"📁 {folder[:35]}…" if len(folder) > 35 else f"📁 {folder}"
         kb.row(InlineKeyboardButton(label, callback_data=f"senddir_{user_id}_{folder}"))
-    send_as   = UserManager.get_settings(user_id).get("send_as", "video")
+    send_as = UserManager.get_settings(user_id).get("send_as", "video")
     limit_str = fmt_size(MAX_SEND_BYTES())
     bot.reply_to(
         message,
@@ -2737,9 +3160,9 @@ def cmd_sendfiles(message: Message):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("senddir_"))
 def cb_senddir(call: CallbackQuery):
-    parts   = call.data.split("_", 2)
+    parts = call.data.split("_", 2)
     user_id = int(parts[1])
-    folder  = parts[2]
+    folder = parts[2]
     bot.answer_callback_query(call.id, "⏳ Listing files…")
     try:
         bot.edit_message_text(
@@ -2748,13 +3171,22 @@ def cb_senddir(call: CallbackQuery):
             text=f"🔍 Listing <code>GDRIVE:{safe_escape(folder)}</code>…",
             parse_mode="HTML",
         )
-    except: pass
+    except:
+        pass
     rclone = get_rclone_path(user_id)
-    cfg    = get_config_file(user_id)
+    cfg = get_config_file(user_id)
     if not os.path.exists(rclone) or not os.path.exists(cfg):
         send_msg(call.message.chat.id, "❌ rclone not ready. Run /upload first.")
         return
-    ok, out, err = run_rclone(rclone, cfg, "lsf", f"GDRIVE:{folder}", "--recursive", "--files-only", timeout=120)
+    ok, out, err = run_rclone(
+        rclone,
+        cfg,
+        "lsf",
+        f"GDRIVE:{folder}",
+        "--recursive",
+        "--files-only",
+        timeout=120,
+    )
     if not ok:
         send_msg(call.message.chat.id, f"❌ Failed to list: {safe_escape(err)}")
         return
@@ -2762,7 +3194,7 @@ def cb_senddir(call: CallbackQuery):
     if not files:
         send_msg(call.message.chat.id, "📁 No files found in this folder.")
         return
-    send_as   = UserManager.get_settings(user_id).get("send_as", "video")
+    send_as = UserManager.get_settings(user_id).get("send_as", "video")
     limit_str = fmt_size(MAX_SEND_BYTES())
     status_msg = send_msg(
         call.message.chat.id,
@@ -2774,26 +3206,52 @@ def cb_senddir(call: CallbackQuery):
     if status_msg:
         threading.Thread(
             target=_send_files_worker,
-            args=(call.message.chat.id, user_id, folder, files, rclone, cfg, send_as, status_msg.message_id),
+            args=(
+                call.message.chat.id,
+                user_id,
+                folder,
+                files,
+                rclone,
+                cfg,
+                send_as,
+                status_msg.message_id,
+            ),
             daemon=True,
         ).start()
 
 
 def _ffmpeg_available() -> bool:
     try:
-        return subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5).returncode == 0
-    except: return False
+        return (
+            subprocess.run(
+                ["ffmpeg", "-version"], capture_output=True, timeout=5
+            ).returncode
+            == 0
+        )
+    except:
+        return False
 
 
 def _probe_duration(video_path: str) -> float:
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True, timeout=20,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         return float(r.stdout.strip())
-    except: return 0.0
+    except:
+        return 0.0
 
 
 def _secs_to_ts(secs: float) -> str:
@@ -2804,8 +3262,12 @@ def _secs_to_ts(secs: float) -> str:
 
 
 def _generate_thumbnail(video_path: str, thumb_path: str) -> bool:
-    duration   = _probe_duration(video_path)
-    candidates = ([duration * 0.20, duration * 0.10] if duration > 0 else []) + [30.0, 5.0, 1.0]
+    duration = _probe_duration(video_path)
+    candidates = ([duration * 0.20, duration * 0.10] if duration > 0 else []) + [
+        30.0,
+        5.0,
+        1.0,
+    ]
     candidates = [c for c in candidates if duration == 0 or c < duration] or [1.0]
     seen, unique_c = set(), []
     for c in candidates:
@@ -2817,35 +3279,61 @@ def _generate_thumbnail(video_path: str, thumb_path: str) -> bool:
         ts = _secs_to_ts(seek)
         try:
             r = subprocess.run(
-                ["ffmpeg", "-y", "-ss", ts, "-i", video_path,
-                 "-vf", "thumbnail=24,scale=320:-2", "-vframes", "1", "-q:v", "2", thumb_path],
-                capture_output=True, timeout=90,
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    ts,
+                    "-i",
+                    video_path,
+                    "-vf",
+                    "thumbnail=24,scale=320:-2",
+                    "-vframes",
+                    "1",
+                    "-q:v",
+                    "2",
+                    thumb_path,
+                ],
+                capture_output=True,
+                timeout=90,
             )
-            if r.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 512:
+            if (
+                r.returncode == 0
+                and os.path.exists(thumb_path)
+                and os.path.getsize(thumb_path) > 512
+            ):
                 return True
-            try: os.remove(thumb_path)
-            except: pass
-        except: pass
+            try:
+                os.remove(thumb_path)
+            except:
+                pass
+        except:
+            pass
     return False
 
 
-def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, status_msg_id):
-    tmp_dir    = f"/tmp/gdrive_send_{user_id}_{int(time.time())}"
+def _send_files_worker(
+    chat_id, user_id, folder, files, rclone, cfg, send_as, status_msg_id
+):
+    tmp_dir = f"/tmp/gdrive_send_{user_id}_{int(time.time())}"
     os.makedirs(tmp_dir, exist_ok=True)
     sent_count = failed_count = skipped_count = 0
-    total      = len(files)
+    total = len(files)
     has_ffmpeg = _ffmpeg_available()
 
     def _status(phase, filename="", extra=""):
         done = sent_count + failed_count + skipped_count
-        bar  = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
-        pct  = int(100 * done / total) if total else 0
+        bar = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
+        pct = int(100 * done / total) if total else 0
         lines = [
-            f"📦 <b>Sending Files</b>  <code>[{bar}]</code>  {pct}%", "",
+            f"📦 <b>Sending Files</b>  <code>[{bar}]</code>  {pct}%",
+            "",
             f"📁  Progress  <b>{done}/{total}</b>   ✅ {sent_count}  ⏭ {skipped_count}  ❌ {failed_count}",
         ]
-        if filename: lines += ["", f"<b>{phase}</b>  <code>{safe_escape(filename)}</code>"]
-        if extra:    lines.append(extra)
+        if filename:
+            lines += ["", f"<b>{phase}</b>  <code>{safe_escape(filename)}</code>"]
+        if extra:
+            lines.append(extra)
         edit_msg(chat_id, status_msg_id, "\n".join(lines))
 
     for i, filename in enumerate(files, 1):
@@ -2853,28 +3341,39 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
             continue
         _status("⬇️ Downloading", filename)
         remote_path = f"GDRIVE:{folder}/{filename}"
-        local_path  = os.path.join(tmp_dir, os.path.basename(filename))
-        ok_dl, _, err_dl = run_rclone(rclone, cfg, "copyto", remote_path, local_path, timeout=3600)
+        local_path = os.path.join(tmp_dir, os.path.basename(filename))
+        ok_dl, _, err_dl = run_rclone(
+            rclone, cfg, "copyto", remote_path, local_path, timeout=3600
+        )
         if not ok_dl:
             failed_count += 1
-            _status("❌ Download failed", filename, f"<i>{safe_escape(err_dl[:120])}</i>")
+            _status(
+                "❌ Download failed", filename, f"<i>{safe_escape(err_dl[:120])}</i>"
+            )
             time.sleep(2)
             continue
-        try:    file_size = os.path.getsize(local_path)
-        except: file_size = 0
+        try:
+            file_size = os.path.getsize(local_path)
+        except:
+            file_size = 0
         if file_size > MAX_SEND_BYTES():
             skipped_count += 1
-            _status("⏭ Skipped — too large", filename,
-                    f"<i>{fmt_size(file_size)} > {fmt_size(MAX_SEND_BYTES())} limit</i>")
-            try: os.remove(local_path)
-            except: pass
+            _status(
+                "⏭ Skipped — too large",
+                filename,
+                f"<i>{fmt_size(file_size)} > {fmt_size(MAX_SEND_BYTES())} limit</i>",
+            )
+            try:
+                os.remove(local_path)
+            except:
+                pass
             time.sleep(1)
             continue
-        ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         is_video = ext in VIDEO_EXTS
         use_video = send_as == "video" and is_video
         thumb_path = None
-        duration   = 0
+        duration = 0
         if is_video and has_ffmpeg:
             _status("🎞️ Generating thumbnail", filename)
             thumb_path = local_path + ".thumb.jpg"
@@ -2891,22 +3390,23 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
             _status("❌ File missing", filename)
             time.sleep(1)
             continue
-        _upload_done  = threading.Event()
+        _upload_done = threading.Event()
         _upload_start = time.time()
 
         def _spinner(fname=filename, fsize=file_size):
-            spinners = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+            spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             idx = 0
             while not _upload_done.is_set():
                 elapsed = int(time.time() - _upload_start)
-                m2, s2  = divmod(elapsed, 60)
-                estr    = f"{m2}m {s2}s" if m2 else f"{s2}s"
-                done    = sent_count + failed_count + skipped_count
-                bar2    = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
-                pct2    = int(100 * done / total) if total else 0
-                spin    = spinners[idx % len(spinners)]
+                m2, s2 = divmod(elapsed, 60)
+                estr = f"{m2}m {s2}s" if m2 else f"{s2}s"
+                done = sent_count + failed_count + skipped_count
+                bar2 = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
+                pct2 = int(100 * done / total) if total else 0
+                spin = spinners[idx % len(spinners)]
                 edit_msg(
-                    chat_id, status_msg_id,
+                    chat_id,
+                    status_msg_id,
                     f"📦 <b>Sending Files</b>  <code>[{bar2}]</code>  {pct2}%\n\n"
                     f"📁  Progress  <b>{done}/{total}</b>   🟢 {sent_count}  ⏭ {skipped_count}  ❌ {failed_count}\n\n"
                     f"{spin}  <b>Uploading</b>  <code>{safe_escape(fname)}</code>\n\n"
@@ -2923,11 +3423,16 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
                 try:
                     if use_video:
                         kwargs = dict(
-                            chat_id=chat_id, video=f, caption=caption,
-                            parse_mode="HTML", supports_streaming=True,
-                            duration=duration or None, timeout=3600,
+                            chat_id=chat_id,
+                            video=f,
+                            caption=caption,
+                            parse_mode="HTML",
+                            supports_streaming=True,
+                            duration=duration or None,
+                            timeout=3600,
                         )
-                        if thumb_fh: kwargs["thumbnail"] = thumb_fh
+                        if thumb_fh:
+                            kwargs["thumbnail"] = thumb_fh
                         try:
                             bot.send_video(**kwargs)
                         except TypeError:
@@ -2938,10 +3443,14 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
                             bot.send_video(**kwargs)
                     else:
                         kwargs = dict(
-                            chat_id=chat_id, document=f, caption=caption,
-                            parse_mode="HTML", timeout=3600,
+                            chat_id=chat_id,
+                            document=f,
+                            caption=caption,
+                            parse_mode="HTML",
+                            timeout=3600,
                         )
-                        if thumb_fh: kwargs["thumbnail"] = thumb_fh
+                        if thumb_fh:
+                            kwargs["thumbnail"] = thumb_fh
                         try:
                             bot.send_document(**kwargs)
                         except TypeError:
@@ -2951,14 +3460,16 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
                                 kwargs["thumb"] = thumb_fh
                             bot.send_document(**kwargs)
                 finally:
-                    if thumb_fh: thumb_fh.close()
+                    if thumb_fh:
+                        thumb_fh.close()
             sent_count += 1
             try:
                 bot.send_sticker(
                     chat_id,
                     "CAACAgEAAxkBAAIZWWfbz7HRAAG_TpNxVjPxUAcU4tcibgACpQADHRnARCfGLhsFn5OdNgQ",
                 )
-            except: pass
+            except:
+                pass
         except Exception as e:
             failed_count += 1
             print(f"[upload] {filename}: {e}")
@@ -2967,16 +3478,21 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
         finally:
             _upload_done.set()
             spinner_thread.join(timeout=2)
-            try: os.remove(local_path)
-            except: pass
+            try:
+                os.remove(local_path)
+            except:
+                pass
             if thumb_path:
-                try: os.remove(thumb_path)
-                except: pass
+                try:
+                    os.remove(thumb_path)
+                except:
+                    pass
         time.sleep(0.3)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     edit_msg(
-        chat_id, status_msg_id,
+        chat_id,
+        status_msg_id,
         f"🟢 <b>All Done!</b>\n\n"
         f"{DIVIDER_SM}\n"
         f"📤  Sent     <b>{sent_count}</b>\n"
@@ -2991,30 +3507,38 @@ def _send_files_worker(chat_id, user_id, folder, files, rclone, cfg, send_as, st
 
 
 def _parse_dt(value):
-    if value is None: return None
-    if isinstance(value, datetime): return value
-    try: return datetime.fromisoformat(str(value))
-    except: return None
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except:
+        return None
 
 
 @bot.message_handler(commands=["history"])
 def cmd_history(message: Message):
-    user_id   = message.from_user.id
+    user_id = message.from_user.id
     transfers = UserManager.get_transfers(user_id)
     if not transfers:
-        bot.reply_to(message, "📜 <b>No transfer history yet.</b>\n\nStart a transfer with /upload.", parse_mode="HTML")
+        bot.reply_to(
+            message,
+            "📜 <b>No transfer history yet.</b>\n\nStart a transfer with /upload.",
+            parse_mode="HTML",
+        )
         return
     emoji_map = {"completed": "✅", "failed": "❌", "cancelled": "⏹"}
-    header    = f"📜 <b>Transfer History</b>\n{DIVIDER}\n"
-    blocks    = []
+    header = f"📜 <b>Transfer History</b>\n{DIVIDER}\n"
+    blocks = []
     for t in transfers:
-        icon  = emoji_map.get(t["status"], "❓")
-        dt_s  = _parse_dt(t["start_time"])
-        dt_e  = _parse_dt(t["end_time"])
+        icon = emoji_map.get(t["status"], "❓")
+        dt_s = _parse_dt(t["start_time"])
+        dt_e = _parse_dt(t["end_time"])
         start = dt_s.strftime("%Y-%m-%d %H:%M") if dt_s else "—"
-        end   = dt_e.strftime("%H:%M")           if dt_e else "—"
-        dur   = str(dt_e - dt_s).split(".")[0]   if dt_s and dt_e else "—"
-        folder= safe_escape(t["destination_folder"] or "—")
+        end = dt_e.strftime("%H:%M") if dt_e else "—"
+        dur = str(dt_e - dt_s).split(".")[0] if dt_s and dt_e else "—"
+        folder = safe_escape(t["destination_folder"] or "—")
         blocks.append(
             f"{icon} <b>#{t['id']}  {t['status'].title()}</b>\n"
             f"📅  {start} → {end}  ({dur})\n"
@@ -3023,17 +3547,21 @@ def cmd_history(message: Message):
             f"📤  Transferred <b>{t['transferred_size'] or 'Unknown'}</b>\n"
             f"⚡  Speed       <b>{t['speed'] or '—'}</b>\n"
             f"📂  Folder      <code>{folder}</code>\n"
-            + (f"⚠️  Error       {safe_escape(t['error_message'])}\n" if t.get("error_message") else "")
+            + (
+                f"⚠️  Error       {safe_escape(t['error_message'])}\n"
+                if t.get("error_message")
+                else ""
+            )
             + f"{DIVIDER_SM}\n"
         )
     pages, current, current_len = [], header, len(header)
     for block in blocks:
         if current_len + len(block) + 1 > 3900:
             pages.append(current)
-            current     = block
+            current = block
             current_len = len(block)
         else:
-            current     += "\n" + block
+            current += "\n" + block
             current_len += len(block) + 1
     if current:
         pages.append(current)
@@ -3047,21 +3575,27 @@ def cmd_history(message: Message):
 
 def set_commands():
     try:
-        bot.set_my_commands([
-            telebot.types.BotCommand("start",     "🛸 Home — commands & status"),
-            telebot.types.BotCommand("guide",     "📖 Full setup guide"),
-            telebot.types.BotCommand("config",    "⚙️ Set rclone configuration"),
-            telebot.types.BotCommand("upload",    "🚀 Start PikPak → GDrive transfer"),
-            telebot.types.BotCommand("stop",      "⏹ Instantly stop transfer"),
-            telebot.types.BotCommand("status",    "📊 Live network status card"),
-            telebot.types.BotCommand("drive",     "💾 GDrive storage stats"),
-            telebot.types.BotCommand("drivvy",    "📁 List GDrive contents"),
-            telebot.types.BotCommand("pikky",     "🎬 PikPak storage & videos"),
-            telebot.types.BotCommand("sendfiles", "📤 Send GDrive files to Telegram"),
-            telebot.types.BotCommand("settings",  "⚙️ Upload type & preferences"),
-            telebot.types.BotCommand("localapi",  "🖥 Setup local API for 2 GB uploads"),
-            telebot.types.BotCommand("history",   "📜 Transfer history"),
-        ])
+        bot.set_my_commands(
+            [
+                telebot.types.BotCommand("start", "🛸 Home — commands & status"),
+                telebot.types.BotCommand("guide", "📖 Full setup guide"),
+                telebot.types.BotCommand("config", "⚙️ Set rclone configuration"),
+                telebot.types.BotCommand("upload", "🚀 Start PikPak → GDrive transfer"),
+                telebot.types.BotCommand("stop", "⏹ Instantly stop transfer"),
+                telebot.types.BotCommand("status", "📊 Live network status card"),
+                telebot.types.BotCommand("drive", "💾 GDrive storage stats"),
+                telebot.types.BotCommand("drivvy", "📁 List GDrive contents"),
+                telebot.types.BotCommand("pikky", "🎬 PikPak storage & videos"),
+                telebot.types.BotCommand(
+                    "sendfiles", "📤 Send GDrive files to Telegram"
+                ),
+                telebot.types.BotCommand("settings", "⚙️ Upload type & preferences"),
+                telebot.types.BotCommand(
+                    "localapi", "🖥 Setup local API for 2 GB uploads"
+                ),
+                telebot.types.BotCommand("history", "📜 Transfer history"),
+            ]
+        )
         print("✓ Bot commands set.")
     except Exception as e:
         print(f"⚠️ Could not set commands: {e}")
@@ -3088,7 +3622,8 @@ def _kill_previous_instance():
     try:
         with open(LOCK_FILE, "w") as f:
             f.write(str(os.getpid()))
-    except: pass
+    except:
+        pass
     try:
         bot.delete_webhook(drop_pending_updates=True)
         print("✓ Webhook cleared, pending updates dropped.")
@@ -3113,8 +3648,10 @@ def main():
         print(f"[main] polling error: {e}")
     finally:
         stop_local_api()
-        try: os.remove(LOCK_FILE)
-        except: pass
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
 
 
 if __name__ == "__main__":
