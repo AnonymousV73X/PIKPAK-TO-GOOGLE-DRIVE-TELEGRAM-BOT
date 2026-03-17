@@ -1089,7 +1089,7 @@ class TransferManager:
             spd_icon = "🔴"
 
         lines = [
-            "🍀 <b>BELOW IS YOU LIVE TRANSFER 🍀</b>",
+            "🍀 <b>BELOW IS YOUR LIVE TRANSFER 🍀</b>",
             "",
             f"<code>[{bar}]</code>  <b>{pct}%</b>",
             "",
@@ -1253,6 +1253,12 @@ class TransferManager:
             for line in out2.split("\n"):
                 if line.startswith("Total size:"):
                     self.total_size_str = line.split(":", 1)[1].strip()
+                    self.total_size_str = (
+                        self.total_size_str.replace("(", "").replace(")", "").strip()
+                    )
+                    self.total_size_str = re.sub(
+                        r"\bByte\b", "Bytes", self.total_size_str
+                    )
                     self.total_size_bytes = self._parse_size_bytes(self.total_size_str)
                     break
 
