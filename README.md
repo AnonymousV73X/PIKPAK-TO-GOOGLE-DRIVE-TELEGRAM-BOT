@@ -46,7 +46,7 @@ Transfer all your PikPak videos to Google Drive at max speed — directly from T
 3. Copy the token you receive
 
 ### Step 2 — Set your token
-Open `main.py` and replace the token near the top:
+Open `main.py` and replace the token near the top LINE 286:
 ```python
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 ```
@@ -95,7 +95,13 @@ Auto config> y
 
 Export:
 ```bash
-cat ~/.config/rclone/rclone.conf
+cat C:\Users\user\AppData\Roaming\rclone\rclone.conf
+```
+
+or get the config file if you dont now the dir 
+
+```bash
+rclone config file
 ```
 
 **Option B — No terminal:** Use [rclone.dev](https://rclone.dev) in your browser to build the config visually, then export it.
