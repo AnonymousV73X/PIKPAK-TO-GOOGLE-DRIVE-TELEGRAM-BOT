@@ -283,7 +283,7 @@ def stop_local_api():
 #?   CONFIGURATION
 #? ══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "8228895165:AAEZv5SAQoca9kp2tSuk2Q0i4U0LmDxLPbU"
+BOT_TOKEN = "YOUR TOKEN HERE"
 
 #? ══════════════════════════════════════════════════════════════
 
