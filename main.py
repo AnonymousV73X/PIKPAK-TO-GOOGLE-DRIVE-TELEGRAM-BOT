@@ -283,7 +283,7 @@ def stop_local_api():
 #?   CONFIGURATION
 #? ══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "YOUR TOKEN HERE"
+BOT_TOKEN = "YOUR BOT TOKEN HERE"
 
 #? ══════════════════════════════════════════════════════════════
 
@@ -413,6 +413,26 @@ def _boot_local_api() -> bool:
 
 _using_local_api = _boot_local_api()
 bot = make_bot(_using_local_api)
+
+#* ─── Upload Speed Optimizations ─────────────────────────────────────────────────
+# Fastest Telegram upload technique:
+#  1. Use 8 threads (set in TeleBot constructor above).
+#  2. Increase read_timeout so large file uploads don't time out mid-transfer.
+#  3. Set CONNECT_TIMEOUT high enough for slow starts.
+#  4. Use upload_chunk_size = 512 KB (pytelegrambotapi default is 64 KB).
+#     Bigger chunks = fewer round trips = faster throughput, especially on local API.
+#  5. Keep file handles open during send (already done via `with open(...)`) to avoid
+#     OS re-read overhead.
+#  6. For local API (2 GB mode): the local server bypasses Telegram CDN entirely,
+#     making uploads up to 10× faster than the official API.
+import telebot.apihelper as _tg_ah
+_tg_ah.CONNECT_TIMEOUT = 15    # seconds to establish TCP connection
+_tg_ah.READ_TIMEOUT    = 3600  # seconds to wait for a response (large files)
+# 512 KB upload chunks — best balance of speed and memory on most VPS/Colab
+try:
+    _tg_ah.UPLOAD_CHUNK_SIZE = 512 * 1024
+except AttributeError:
+    pass  # older pyTelegramBotAPI versions don't expose this constant
 
 
 def MAX_SEND_BYTES() -> int:
@@ -736,14 +756,18 @@ def _make_kb(buttons: list) -> InlineKeyboardMarkup:
 
 
 #* ─── FIX 1: Rate-limit-aware send_msg ───────────────────────────────────────────
-#* Key changes:
-#?  • Dedup guard: track the last message sent per (chat_id, text_hash) to prevent
-#?    duplicate sends caused by API restarts + /start replays.
-#.  • On 429, honour the retry_after from Telegram instead of hammering in a loop.
-#.  • Single retry after honouring the wait — if it fails again, give up gracefully.
 
-_last_sent: dict = {}  #. (chat_id, hash) → message_id
+_last_sent: dict = {}
 _last_sent_lock = threading.Lock()
+
+# Global per-chat rate limiter
+_send_last: dict = {}
+_send_last_lock = threading.Lock()
+_SEND_MIN_INTERVAL = 2.0  # min seconds between sends to same chat
+
+# Global 429 backoff — when Telegram says wait, ALL sends wait
+_global_send_backoff_until = [0.0]
+_global_send_lock = threading.Lock()
 
 
 def _text_key(chat_id, text) -> tuple:
@@ -755,20 +779,30 @@ def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None)
 
     text = str(text)
 
-    #- ── Dedup guard ──────────────────────────────────────────────────────────────
+    # Dedup guard
     key = _text_key(chat_id, text)
     with _last_sent_lock:
         if key in _last_sent:
-            # Same message already sent to this chat recently — skip
             return None
         _last_sent[key] = True
-        # Prune cache to avoid unbounded growth
         if len(_last_sent) > 500:
-            oldest = list(_last_sent.keys())[:100]
-            for k in oldest:
+            for k in list(_last_sent.keys())[:100]:
                 _last_sent.pop(k, None)
 
     def _attempt():
+        # Honour global 429 backoff first
+        with _global_send_lock:
+            wait = _global_send_backoff_until[0] - time.time()
+        if wait > 0:
+            time.sleep(wait)
+
+        # Per-chat spacing
+        with _send_last_lock:
+            gap = _SEND_MIN_INTERVAL - (time.time() - _send_last.get(chat_id, 0))
+            if gap > 0:
+                time.sleep(gap)
+            _send_last[chat_id] = time.time()
+
         if len(text) <= 4000:
             kwargs = dict(chat_id=chat_id, text=text, parse_mode=parse_mode)
             if reply_markup:
@@ -776,6 +810,7 @@ def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None)
             if reply_to:
                 kwargs["reply_to_message_id"] = reply_to
             return bot.send_message(**kwargs)
+
         # Chunked send
         chunks, buf = [], ""
         for line in text.split("\n"):
@@ -799,7 +834,7 @@ def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None)
                 sent = bot.send_message(**kwargs)
             except Exception as e:
                 print(f"[send_msg chunk {i+1}] {e}")
-            time.sleep(0.3)
+            time.sleep(0.5)
         return sent
 
     def _try_send():
@@ -807,24 +842,24 @@ def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None)
             return _attempt()
         except Exception as e:
             err_str = str(e).lower()
-            # 429 — honour the retry_after, then try ONCE more
             if "429" in err_str or "too many requests" in err_str:
-                wait = 30
+                wait = 60  # safe default
                 m = re.search(r"retry after (\d+)", err_str)
                 if m:
-                    wait = int(m.group(1))
-                print(f"[send_msg] 429 — waiting {wait}s")
+                    wait = int(m.group(1)) + 2  # +2s safety margin
+                # Set global backoff so ALL subsequent sends also wait
+                with _global_send_lock:
+                    _global_send_backoff_until[0] = time.time() + wait
+                print(f"[send_msg] 429 — backing off {wait}s")
                 time.sleep(wait)
                 try:
                     return _attempt()
                 except Exception as e2:
-                    print(f"[send_msg] retry after 429 failed: {e2}")
+                    print(f"[send_msg] retry failed: {e2}")
                     return None
-            # Local API down — fallback to official once
             if _using_local_api and (
                 "connection refused" in err_str or "max retries" in err_str
             ):
-                print("[send_msg] local API unreachable, falling back to official API")
                 old = _ah.API_URL
                 _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
                 try:
@@ -838,16 +873,45 @@ def send_msg(chat_id, text, parse_mode="HTML", reply_markup=None, reply_to=None)
             return None
 
     result = _try_send()
-    # Remove dedup entry so the message CAN be resent later if needed
     with _last_sent_lock:
         _last_sent.pop(key, None)
     return result
+
+
+# Rate-limit tracker: message_id → last edit timestamp
+# Telegram allows ~20 edits/min globally; we cap at 1 per 4s per message.
+_edit_last: dict = {}
+_edit_last_lock = threading.Lock()
+_EDIT_MIN_INTERVAL = 4.0  # seconds between edits of the same message
 
 
 def edit_msg(chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
     import telebot.apihelper as _ah
 
     text = str(text)[:4000]
+
+    # Check global 429 backoff
+    with _global_send_lock:
+        wait = _global_send_backoff_until[0] - time.time()
+    if wait > 0:
+        # Don't block — just mark this message as blocked and skip
+        with _edit_last_lock:
+            _edit_last[message_id] = time.time() + wait
+        return False
+
+    # Rate-limit: skip if we edited this message too recently
+    now = time.time()
+    with _edit_last_lock:
+        last = _edit_last.get(message_id, 0)
+        if now - last < _EDIT_MIN_INTERVAL:
+            return True  # silently skip — not an error
+        _edit_last[message_id] = now
+        # Prune old entries
+        if len(_edit_last) > 200:
+            cutoff = now - 60
+            stale = [k for k, v in _edit_last.items() if v < cutoff]
+            for k in stale:
+                _edit_last.pop(k, None)
 
     def _attempt():
         bot.edit_message_text(
@@ -865,27 +929,22 @@ def edit_msg(chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
         err_str = str(e).lower()
         if "message is not modified" in err_str:
             return True
-        #. Message was deleted or never existed — fail silently, caller must send new
         if "message to edit not found" in err_str or "message_id_invalid" in err_str:
             return False
         if "429" in err_str or "too many requests" in err_str:
-            wait = 30
-            m = re.search(r"retry after (\d+)", err_str)
-            if m:
-                wait = int(m.group(1))
-            print(f"[edit_msg] 429 — waiting {wait}s")
-            time.sleep(wait)
-            try:
-                return _attempt()
-            except Exception as e2:
-                if "message is not modified" in str(e2).lower():
-                    return True
-                print(f"[edit_msg] retry after 429 failed: {e2}")
-                return False
+                wait = 60
+                m = re.search(r"retry after (\d+)", err_str)
+                if m:
+                    wait = int(m.group(1)) + 2
+                with _global_send_lock:
+                    _global_send_backoff_until[0] = time.time() + wait
+                # Back off this message_id too
+                with _edit_last_lock:
+                    _edit_last[message_id] = time.time() + wait
+                return False  # spinner will retry on next cycle
         if _using_local_api and (
             "connection refused" in err_str or "max retries" in err_str
         ):
-            print("[edit_msg] local API unreachable, falling back to official API")
             old = _ah.API_URL
             _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
             try:
@@ -893,7 +952,6 @@ def edit_msg(chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
             except Exception as e2:
                 if "message is not modified" in str(e2).lower():
                     return True
-                print(f"[edit_msg fallback] {e2}")
                 return False
             finally:
                 _ah.API_URL = old
@@ -1198,7 +1256,7 @@ class TransferManager:
         )
 
         lines = [
-            "🍀 <b>LIVE TRANSFER STATUS</b>",
+            "🍀 <b>BELOW IS THE LIVE TRANSFER STATUS</b> 🍀",
             "",
             f"<code>[{bar}]</code>  <b>{pct}%</b>",
             "",
@@ -1418,17 +1476,7 @@ class TransferManager:
     def _kill_process(self, process):
         if process is None:
             return
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-        for _ in range(50):
-            if process.poll() is not None:
-                return
-            time.sleep(0.1)
+        # SIGKILL immediately — no grace period, instant destruction
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except Exception:
@@ -1436,6 +1484,11 @@ class TransferManager:
                 process.kill()
             except Exception:
                 pass
+        # Wait max 2s for it to die
+        for _ in range(20):
+            if process.poll() is not None:
+                return
+            time.sleep(0.1)
 
     #* ── WebDAV helpers ─────────────────────────────────────────────────────────
 
@@ -1750,11 +1803,220 @@ class TransferManager:
             self._MAX_SESSION_SECS,
         )
 
+    def _check_all_done(self) -> int:
+        """
+        List GDRIVE:destination_folder recursively and count how many of
+        self.video_files are already there. Updates self.files_done.
+        Returns the count of confirmed files.
+        """
+        try:
+            r = subprocess.run(
+                [self.rclone_path, "--config", self.config_file,
+                 "lsf", f"GDRIVE:{self.destination_folder}",
+                 "--recursive", "--files-only"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode != 0:
+                return self.files_done
+            done_names = {os.path.basename(f.strip()) for f in r.stdout.split("\n") if f.strip()}
+            confirmed = sum(
+                1 for f in self.video_files
+                if os.path.basename(f) in done_names
+            )
+            if confirmed > self.files_done:
+                self.files_done = confirmed
+            return confirmed
+        except Exception as e:
+            self.warn(f"_check_all_done failed: {e}")
+            return self.files_done
+
     def _do_transfer(self) -> bool:
         self._kill_evt.clear()
         self.reconnect_count = 0
-        self._ensure_webdav_remote_in_config()
 
+        #. ── STAGE 1: Direct rclone sync (primary) ───────────────────────────
+        #  Simple, fast, no intermediate bridge.  If this exits 0 we're done.
+        #  If it fails or is killed, we fall through to the WebDAV session loop.
+
+        self.info("Attempting direct rclone sync (primary)…")
+        self._edit(
+            f"🚀 <b>Starting Direct Sync</b>\n\n{DIVIDER_SM}\n"
+            f"📡  PIKKY: → GDRIVE:{safe_escape(self.destination_folder)}\n"
+            f"💾  <b>{self.total_size_str}</b>  ·  <b>{len(self.video_files)}</b> video(s)\n\n"
+            "⚡  Running rclone sync…",
+            self._stop_kb(),
+        )
+
+        video_extensions = VIDEO_EXTS
+        filter_rules = (
+            ["+ */"] + [f"+ *.{ext}" for ext in video_extensions] + ["- .*", "- *"]
+        )
+        filter_str = " ".join([f'--filter "{r}"' for r in filter_rules])
+
+        sync_cmd = (
+            f'{self.rclone_path} --config {self.config_file} '
+            f'sync PIKKY: "GDRIVE:{self.destination_folder}" '
+            f"{filter_str} "
+            f"--progress --stats 30s --stats-one-line "
+            f"--transfers 4 --checkers 8 --fast-list --checksum "
+            f"--drive-chunk-size 64M --buffer-size 32M"
+        )
+
+        sync_stderr: list = []
+
+        try:
+            sync_proc = subprocess.Popen(
+                sync_cmd,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except Exception as e:
+            self.err(f"Direct sync failed to start: {e}")
+            sync_proc = None
+
+        if sync_proc is not None:
+            with self.process_lock:
+                self.transfer_process = sync_proc
+
+            _tf_re = re.compile(r"Transferred:\s+(\d+)\s*/\s*(\d+),\s*\d+%")
+
+            def _sync_reader(p=sync_proc, buf=sync_stderr, mgr=self):
+                try:
+                    for raw in p.stderr:
+                        line = raw.decode(errors="replace").rstrip()
+                        if not line:
+                            continue
+                        buf.append(line)
+                        m = _tf_re.search(line)
+                        if m:
+                            n = int(m.group(1))
+                            if n > mgr.files_done:
+                                mgr.files_done = n
+                except Exception:
+                    pass
+
+            sync_read_thr = threading.Thread(target=_sync_reader, daemon=True)
+            sync_read_thr.start()
+
+            # Background thread: check GDrive every 60s and update files_done.
+            # This keeps the status card accurate even when rclone stderr is quiet.
+            _gd_check_stop = threading.Event()
+            def _gd_checker():
+                time.sleep(30)  # first check after 30s
+                while not _gd_check_stop.is_set():
+                    try:
+                        self._check_all_done()
+                    except Exception:
+                        pass
+                    _gd_check_stop.wait(60)
+            _gd_check_t = threading.Thread(target=_gd_checker, daemon=True)
+            _gd_check_t.start()
+
+            # Poll loop — honour stop + speed watchdog
+            _sync_slow_since  = None
+            _sync_last_bytes  = self.network_monitor.total_uploaded
+            _sync_last_sample = time.time()
+            _SYNC_SLOW_LIMIT  = 30.0  # 30s below 1 MB/s → abandon direct sync
+
+            while True:
+                if self._kill_evt.is_set() or self.stop_requested:
+                    self._kill_process(sync_proc)
+                    sync_read_thr.join(timeout=2)
+                    with self.process_lock:
+                        self.transfer_process = None
+                    return False
+                if sync_proc.poll() is not None:
+                    break
+
+                time.sleep(0.2)
+                now = time.time()
+                dt  = now - _sync_last_sample
+                if dt >= 2.0:
+                    cur = self.network_monitor.total_uploaded
+                    spd = (cur - _sync_last_bytes) / dt
+                    _sync_last_bytes  = cur
+                    _sync_last_sample = now
+                    if spd < self._SPEED_THRESHOLD:
+                        if _sync_slow_since is None:
+                            _sync_slow_since = now
+                        elif now - _sync_slow_since >= _SYNC_SLOW_LIMIT:
+                            self.warn(f"Direct sync stalled ({fmt_size(spd)}/s) — switching to WebDAV")
+                            self._kill_process(sync_proc)
+                            sync_read_thr.join(timeout=2)
+                            with self.process_lock:
+                                self.transfer_process = None
+                            # Force fallback to WebDAV
+                            sync_rc = -1
+                            break
+                    else:
+                        _sync_slow_since = None
+
+            _gd_check_stop.set()
+            sync_read_thr.join(timeout=5)
+            # Only read returncode if not already set by watchdog
+            if sync_proc.poll() is not None:
+                sync_rc = sync_proc.returncode
+            with self.process_lock:
+                self.transfer_process = None
+
+            # ── Fatal error check on primary ──────────────────────────────────
+            err_tail = "\n".join(sync_stderr[-8:]).lower()
+            FATAL_ERRORS = [
+                (
+                    "storagequotaexceeded",
+                    "❌ <b>Google Drive Full</b>\n\nFree up space at drive.google.com then retry.",
+                ),
+                (
+                    "invalidcredentials",
+                    "❌ <b>GDrive Auth Failed</b>\n\nRe-run /config with a fresh rclone config.",
+                ),
+                ("autherror", "❌ <b>GDrive Auth Failed</b>\n\nRe-run /config."),
+                (
+                    "tokenerror",
+                    "❌ <b>GDrive Token Error</b>\n\nRe-run /config to refresh your GDrive token.",
+                ),
+            ]
+            for keyword, msg in FATAL_ERRORS:
+                if keyword in err_tail:
+                    self.err(f"Fatal error in primary sync — aborting: {err_tail[-100:]}")
+                    self._edit(msg, None)
+                    return False
+
+            if sync_rc == 0:
+                self.ok("Direct sync completed successfully ✓")
+                self.files_done = len(self.video_files)
+                return True
+
+            # Direct sync failed or was killed by watchdog — check GDrive anyway.
+            # Files may have already been uploaded before the stall.
+            self.info("Checking GDrive after direct sync failure…")
+            confirmed = self._check_all_done()
+            if confirmed >= len(self.video_files):
+                self.ok(f"All {confirmed} files confirmed on GDrive ✓ (despite sync exit)")
+                self.files_done = confirmed
+                return True
+            self.info(f"{confirmed}/{len(self.video_files)} files on GDrive — falling back to WebDAV")
+
+            self.warn(
+                f"Direct sync exited with rc={sync_rc} — falling back to WebDAV sessions…"
+            )
+            self._edit(
+                f"⚠️ <b>Direct Sync Failed (rc={sync_rc})</b>\n\n{DIVIDER_SM}\n"
+                f"Switching to WebDAV session mode…\n\n"
+                f"💾  <b>{len(self.video_files)}</b> video(s) to transfer",
+                self._stop_kb(),
+            )
+            time.sleep(2)
+        else:
+            self.warn("Direct sync could not start — falling back to WebDAV sessions…")
+
+        #. ── STAGE 2: WebDAV session loop (fallback) ─────────────────────────
+        #  Spins up rclone WebDAV bridge on localhost, copies through it, auto-
+        #  reconnects on stall, checks GDrive after each session.
+
+        self._ensure_webdav_remote_in_config()
         remaining = list(self.video_files)
         done_basenames: set = set()
 
@@ -1767,7 +2029,6 @@ class TransferManager:
                 self.files_done = len(self.video_files)
                 return True
 
-            # ── FIX 4: session-aware slowness threshold ───────────────────────
             session_slow_limit = self._session_timeout(session_idx)
 
             self._edit(
@@ -1798,9 +2059,9 @@ class TransferManager:
             with self.process_lock:
                 self.transfer_process = copy_proc
 
-            #! ── Speed watchdog ────────────────────────────────────────────────
-            slow_seconds = 0
+            slow_since    = None
             last_up_bytes = self.network_monitor.total_uploaded
+            last_sample_t = time.time()
             reconnect_now = False
 
             while True:
@@ -1816,25 +2077,29 @@ class TransferManager:
                 if copy_proc.poll() is not None:
                     break
 
-                time.sleep(1)
+                time.sleep(0.5)
+                now    = time.time()
                 cur_up = self.network_monitor.total_uploaded
-                delta = cur_up - last_up_bytes
-                last_up_bytes = cur_up
-                speed_bps = delta
+                dt     = now - last_sample_t
 
-                if speed_bps < self._SPEED_THRESHOLD:
-                    slow_seconds += 1
-                else:
-                    slow_seconds = 0
+                if dt >= 2.0:   # sample speed every 2s
+                    speed_bps = (cur_up - last_up_bytes) / dt
+                    last_up_bytes = cur_up
+                    last_sample_t = now
 
-                if slow_seconds >= session_slow_limit:
-                    self.warn(
-                        f"Speed {fmt_size(speed_bps)}/s < 1 MB/s for "
-                        f"{session_slow_limit}s — triggering reconnect"
-                    )
-                    reconnect_now = True
-                    self._kill_process(copy_proc)
-                    break
+                    if speed_bps < self._SPEED_THRESHOLD:
+                        if slow_since is None:
+                            slow_since = now
+                        elif now - slow_since >= session_slow_limit:
+                            self.warn(
+                                f"Speed {fmt_size(speed_bps)}/s < 1 MB/s for "
+                                f"{session_slow_limit}s — triggering reconnect"
+                            )
+                            reconnect_now = True
+                            self._kill_process(copy_proc)
+                            break
+                    else:
+                        slow_since = None
 
             if err_thr:
                 err_thr.join(timeout=5)
@@ -1846,7 +2111,6 @@ class TransferManager:
             time.sleep(2)
             self._kill_process(webdav_proc)
 
-            #. ── Check GDrive ──────────────────────────────────────────────────
             self.info("Checking GDrive for completed files…")
             gd_done = self._gdrive_list_done()
             done_basenames |= gd_done
@@ -1874,7 +2138,6 @@ class TransferManager:
                 self.files_done = len(self.video_files)
                 return True
 
-            #? ── Fatal error check ─────────────────────────────────────────────
             err_tail = "\n".join(stderr_lines[-8:]).lower()
             FATAL_ERRORS = [
                 (
@@ -1897,7 +2160,6 @@ class TransferManager:
                     self._edit(msg, None)
                     return False
 
-            #- ── Rate limit wait ───────────────────────────────────────────────
             is_rate_limit = any(
                 k in err_tail
                 for k in ["ratelimitexceeded", "rate limit", "userratelimitexceeded"]
@@ -1920,15 +2182,12 @@ class TransferManager:
                     time.sleep(0.5)
                 continue
 
-            #. Normal reconnect
             self.reconnect_count += 1
             if reconnect_now or rc in (0, 5) or rc != 0:
-                time.sleep(
-                    min(3 + session_idx * 2, 15)
-                )  #$ small backoff between sessions
+                time.sleep(min(3 + session_idx * 2, 15))
                 continue
 
-        #? ── FIX 4 + 5: MAX_SESSIONS hit → try fallback before giving up ──────
+        # WebDAV session cap hit → last-resort direct copy
         if remaining:
             self.warn(
                 f"Reached {self._MAX_SESSIONS} WebDAV sessions. Trying direct fallback…"
@@ -1944,7 +2203,6 @@ class TransferManager:
                 self.files_done = len(self.video_files)
                 return True
 
-            #- Fallback also failed — let user know what's available
             confirmed = sum(
                 1
                 for f in self.video_files
@@ -1961,7 +2219,6 @@ class TransferManager:
                 "Use /sendfiles to retrieve the files already transferred.",
                 None,
             )
-            # Return True so run() saves as "partial" rather than "failed"
             return confirmed > 0
 
         return len(remaining) == 0
@@ -1970,6 +2227,11 @@ class TransferManager:
         self.stop_requested = True
         self.transfer_in_progress = False
         self._kill_evt.set()
+        # Kill the current subprocess immediately
+        with self.process_lock:
+            proc = self.transfer_process
+        if proc:
+            self._kill_process(proc)
         self.network_monitor.stop()
 
     def _status_loop(self):
@@ -2068,7 +2330,13 @@ class TransferManager:
 
             if self.stop_requested:
                 status = "cancelled"
-                self._edit(
+                # Delete the stale live status card, then send a clean summary
+                if self.status_msg_id:
+                    delete_msg(self.chat_id, self.status_msg_id)
+                    MsgStore.clear(self.user_id, "status")
+                    self.status_msg_id = None
+                send_msg(
+                    self.chat_id,
                     f"⏹  <b>Transfer Cancelled</b>\n\n{DIVIDER_SM}\n"
                     f"📤  Uploaded   <b>{transferred_size}</b>\n"
                     f"🎬  Videos     <b>{len(self.video_files)}</b>\n"
@@ -2143,6 +2411,97 @@ managers: dict = {}
 #$ FIX 6: PikPak file browser state
 _pikpak_browser: dict = {}  #. user_id → {"files": [...], "selected": set()}
 
+#* ─── Sendfiles Live Status Tracker ─────────────────────────────────────────────
+# Stores live state for the GDrive → Telegram send worker so /ustatus can show it.
+_sf_status: dict = {}  # user_id → state dict
+
+
+def _sf_status_text(user_id: int) -> str:
+    """Render the /ustatus card for a running sendfiles job."""
+    s = _sf_status.get(user_id)
+    if not s or s.get("phase") == "idle":
+        return "💤 <b>No active send job.</b>\n\nUse /sendfiles to start one."
+    phase = s.get("phase", "idle")
+    done = s.get("done", 0)
+    total = s.get("total", 1) or 1
+    sent = s.get("sent", 0)
+    skipped = s.get("skipped", 0)
+    failed = s.get("failed", 0)
+    fname = s.get("filename", "")
+    start = s.get("start_time")
+    elapsed_str = "—"
+    if start:
+        elapsed = int((datetime.now() - start).total_seconds())
+        m2, s2 = divmod(elapsed, 60)
+        elapsed_str = f"{m2}m {s2}s" if m2 else f"{s2}s"
+
+    ob = make_bar(int(BAR_DL * done / total), BAR_DL)
+    opct = int(100 * done / total)
+
+    lines = [
+        "📡 <b>SENDFILES LIVE STATUS</b>",
+        "",
+        f"🔹 →  <code>[{ob}]</code>  {opct}%",
+        "",
+        f"🎴  Progress  {done}/{total}   S → {sent}  P → {skipped}  C → {failed}",
+        "",
+        DIVIDER_SM,
+    ]
+
+    if phase == "downloading":
+        dl_bytes = s.get("dl_bytes", 0)
+        dl_size = s.get("dl_size", 0)
+        dl_spd = s.get("dl_speed_bps", 0)
+        if dl_size > 0:
+            fp = min(int(dl_bytes / dl_size * 100), 100)
+            fb = make_bar(int(BAR_DL * fp / 100), BAR_DL)
+            fpct = f"{fp}%"
+            size_info = f"{fmt_size(dl_bytes)} / {fmt_size(dl_size)}"
+        else:
+            fb = EMPTY * BAR_DL
+            fpct = "…"
+            size_info = fmt_size(dl_bytes) if dl_bytes else "—"
+        spd_str = fmt_size(dl_spd) + "/s" if dl_spd > 0 else "—"
+        lines += [
+            f"⬇️  <b>Downloading</b>  <code>{safe_escape(fname)}</code>",
+            DIVIDER_SM,
+            f"🔹 ←  <code>[{fb}]</code>  {fpct}",
+            f"🔹 Speed · <b>{spd_str}</b>  ←  GDrive",
+            f"🔹 {size_info}  ·  {elapsed_str} elapsed",
+        ]
+    elif phase == "uploading":
+        up_bytes = s.get("up_bytes_sent", 0)
+        up_size = s.get("up_size", 0)
+        up_spd = s.get("up_speed_bps", 0)
+        if up_size > 0:
+            fp = min(int(up_bytes / up_size * 100), 100)
+            fb = make_bar(int(BAR_DL * fp / 100), BAR_DL)
+            fpct = f"{fp}%"
+            size_info = f"{fmt_size(up_bytes)} / {fmt_size(up_size)}"
+        else:
+            fb = EMPTY * BAR_DL
+            fpct = "…"
+            size_info = fmt_size(up_bytes) if up_bytes else "—"
+        spd_str = fmt_size(up_spd) + "/s" if up_spd > 0 else "—"
+        lines += [
+            f"⬆️  <b>Uploading</b>  <code>{safe_escape(fname)}</code>",
+            DIVIDER_SM,
+            f"🔹 →  <code>[{fb}]</code>  {fpct}",
+            f"🔹 Speed · <b>{spd_str}</b>  →  Telegram",
+            f"🔹 {size_info}  ·  {elapsed_str} elapsed",
+        ]
+    else:
+        lines += [f"⏳  <b>{phase.title()}</b>  <code>{safe_escape(fname)}</code>", DIVIDER_SM]
+
+    return "\n".join(lines)[:4000]
+
+
+def _sf_ustatus_kb(user_id: int) -> InlineKeyboardMarkup:
+    return _make_kb([
+        ("🔄 Refresh", f"ustatus_refresh_{user_id}"),
+        ("⏹ Stop", f"ustatus_stop_{user_id}"),
+    ])
+
 
 def get_rclone_path(user_id):
     return os.path.expanduser(f"~/.local/bin/rclone_{user_id}")
@@ -2216,6 +2575,7 @@ def _home_text(user_id: int) -> str:
         "  /pick        browse & pick files to transfer\n"
         "  /stop        kill transfer instantly\n"
         "  /status      live network stats\n"
+        "  /ustatus     live sendfiles progress\n"
         "  /drive       GDrive storage stats\n"
         "  /drivvy      list GDrive files\n"
         "  /pikky       PikPak storage + videos\n"
@@ -2234,6 +2594,7 @@ def _home_kb(user_id: int) -> InlineKeyboardMarkup:
             ("🚀 Upload All", f"home_upload_{user_id}"),
             ("🗂 Pick Files", f"home_pick_{user_id}"),
             ("📤 Send Files", f"home_sendfiles_{user_id}"),
+            ("📡 UStatus", f"home_ustatus_{user_id}"),
             ("⚙️ Config", f"home_config_{user_id}"),
             ("💾 GDrive Stats", f"home_drive_{user_id}"),
             ("📁 GDrive Files", f"home_drivvy_{user_id}"),
@@ -2426,6 +2787,19 @@ def cb_home_buttons(call: CallbackQuery):
                 cid,
                 mid,
                 "⚠️ No active transfer running.",
+                reply_markup=_back_home_kb(user_id),
+            )
+    elif action == "ustatus":
+        s = _sf_status.get(user_id)
+        if s and s.get("phase") not in (None, "idle"):
+            sent = send_msg(cid, _sf_status_text(user_id), reply_markup=_sf_ustatus_kb(user_id))
+            if sent and user_id in _sf_status:
+                _sf_status[user_id]["ustatus_chat"] = cid
+                _sf_status[user_id]["ustatus_msg"] = sent.message_id
+        else:
+            edit_msg(
+                cid, mid,
+                "💤 <b>No active send job.</b>\n\nUse /sendfiles to start one.",
                 reply_markup=_back_home_kb(user_id),
             )
     elif action == "localapi":
@@ -2960,6 +3334,11 @@ def cmd_stop(message: Message):
         )
         return
     ns = mgr.network_monitor.get_stats()
+    # Delete the live status card before stopping
+    if mgr.status_msg_id:
+        delete_msg(mgr.chat_id, mgr.status_msg_id)
+        MsgStore.clear(user_id, "status")
+        mgr.status_msg_id = None
     mgr.stop()
     send_msg(
         message.chat.id,
@@ -3048,15 +3427,16 @@ def cb_stop(call: CallbackQuery):
         bot.answer_callback_query(call.id, "⏹  Stopped.")
     except Exception:
         pass
-    edit_msg(
+    # Delete the live status card — it's stale the moment transfer stops
+    delete_msg(call.message.chat.id, call.message.message_id)
+    MsgStore.clear(mgr.user_id, "status")
+    send_msg(
         call.message.chat.id,
-        call.message.message_id,
         f"⏹  <b>Transfer Cancelled</b>\n\n{DIVIDER_SM}\n"
         f"📤  Uploaded   <b>{ns['total_uploaded']}</b>\n"
         f"⚡  Speed      <b>{ns['upload_speed']}</b>\n"
         f"⏱   Elapsed    <b>{ns['elapsed']}</b>\n{DIVIDER_SM}\n\n"
         "<i>Use /upload or /pick to start a new transfer.</i>",
-        reply_markup=None,
     )
 
 
@@ -3171,14 +3551,60 @@ def cb_localapi_dlbin(call: CallbackQuery):
         bot.answer_callback_query(call.id)
     except Exception:
         pass
-    sent = send_msg(
-        call.message.chat.id,
-        f"⬇️ <b>Download telegram-bot-api binary</b>\n\n{DIVIDER_SM}\n"
-        "Send a download URL or upload the file directly.\n\n"
-        f"Known working link:\n<code>{GDRIVE_DIRECT_DL}</code>\n\nSend /cancel to abort.",
+    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
+
+    # Binary already exists — ask whether to replace or keep it
+    if os.path.isfile(dest) and os.path.getsize(dest) > 100 * 1024:
+        size = fmt_size(os.path.getsize(dest))
+        kb = _make_kb([
+            ("🔄 Replace it", f"localapi_dlbin_replace_{user_id}"),
+            ("✅ Keep existing", f"localapi_back_{user_id}"),
+        ])
+        edit_msg(
+            call.message.chat.id,
+            call.message.message_id,
+            f"⚠️ <b>Binary already exists</b>\n\n{DIVIDER_SM}\n"
+            f"📁 <code>{safe_escape(dest)}</code>\n"
+            f"💾 {size}\n\n"
+            "Replace it or keep the existing one?",
+            reply_markup=kb,
+        )
+        return
+
+    _start_binary_download(call.message.chat.id, call.message.message_id, user_id, dest)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_dlbin_replace_"))
+def cb_localapi_dlbin_replace(call: CallbackQuery):
+    user_id = int(call.data.split("_")[-1])
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
+    try:
+        os.remove(dest)
+    except Exception:
+        pass
+    _start_binary_download(call.message.chat.id, call.message.message_id, user_id, dest)
+
+
+def _start_binary_download(chat_id: int, mid: int, user_id: int, dest: str):
+    edit_msg(
+        chat_id, mid,
+        f"⬇️ <b>Downloading telegram-bot-api binary…</b>\n\n{DIVIDER_SM}\n"
+        "Fetching from Google Drive, please wait…",
     )
-    if sent:
-        bot.register_next_step_handler(sent, _localapi_dlbin_receive, user_id)
+    threading.Thread(
+        target=lambda: _finish_binary_download(
+            chat_id,
+            user_id,
+            mid,
+            _download_binary(GDRIVE_DIRECT_DL, dest, mid, chat_id),
+            dest,
+        ),
+        daemon=True,
+    ).start()
 
 
 def _gdrive_direct_url(share_url: str) -> str:
@@ -3193,48 +3619,159 @@ def _gdrive_direct_url(share_url: str) -> str:
 def _download_binary(
     url: str, dest_path: str, status_msg_id: int, chat_id: int
 ) -> bool:
-    if "drive.google.com" in url:
-        url = _gdrive_direct_url(url)
+    """
+    Download binary using curl or wget subprocess — the only reliable way to handle
+    GDrive's multi-step cookie/redirect confirmation flow.
+    Progress is tracked by polling the growing output file size in a side thread.
+    """
+    os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+
+    # ── pick downloader ───────────────────────────────────────────────────────
+    curl_bin  = shutil.which("curl")
+    wget_bin  = shutil.which("wget")
+
+    if not curl_bin and not wget_bin:
+        edit_msg(chat_id, status_msg_id,
+            "❌ <b>curl / wget not found.</b>\n\nPlease upload the binary manually via /localapi.")
+        return False
+
+    # ── build command ─────────────────────────────────────────────────────────
+    if curl_bin:
+        # -L  follow redirects   -J  use server filename   -b/-c  cookie jar
+        # --insecure in case of cert issues on some VPS
+        cookie_file = dest_path + ".cookies"
+        cmd = [
+            curl_bin,
+            "-L",                        # follow all redirects
+            "-c", cookie_file,           # save cookies
+            "-b", cookie_file,           # send cookies back (handles GDrive confirm)
+            "--retry", "3",
+            "--retry-delay", "2",
+            "--connect-timeout", "20",
+            "--max-time", "600",
+            "-o", dest_path,
+            url,
+        ]
+    else:
+        cookie_file = dest_path + ".cookies"
+        cmd = [
+            wget_bin,
+            "--load-cookies", cookie_file,
+            "--save-cookies", cookie_file,
+            "--keep-session-cookies",
+            "--no-check-certificate",
+            "--tries=3",
+            "--timeout=20",
+            "--waitretry=2",
+            "-O", dest_path,
+            url,
+        ]
+
+    # ── get total size via HEAD first (best-effort) ───────────────────────────
+    total_bytes = 0
+    if curl_bin:
+        try:
+            head = subprocess.run(
+                [curl_bin, "-sI", "-L", "--max-time", "10", url],
+                capture_output=True, text=True, timeout=15
+            )
+            for line in head.stdout.splitlines():
+                if line.lower().startswith("content-length:"):
+                    total_bytes = int(line.split(":", 1)[1].strip())
+                    break
+        except Exception:
+            pass
+
+    # ── launch download process ───────────────────────────────────────────────
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            last_edit = 0
-            os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-            with open(dest_path, "wb") as out:
-                while True:
-                    data = resp.read(65536)
-                    if not data:
-                        break
-                    out.write(data)
-                    downloaded += len(data)
-                    now = time.time()
-                    if now - last_edit >= 3 and total:
-                        pct = int(100 * downloaded / total)
-                        bar = make_bar(int(BAR_DL * downloaded / total), BAR_DL)
-                        edit_msg(
-                            chat_id,
-                            status_msg_id,
-                            f"⬇️ <b>Downloading binary…</b>\n\n"
-                            f"<code>[{bar}]</code>  {pct}%\n"
-                            f"{fmt_size(downloaded)} / {fmt_size(total)}",
-                        )
-                        last_edit = now
-        size = os.path.getsize(dest_path)
-        if size < 1024:
-            os.remove(dest_path)
-            return False
-        st = os.stat(dest_path)
-        os.chmod(dest_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        return True
+        # ensure cookie file exists (wget needs it)
+        open(cookie_file, "a").close()
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        print(f"[dlbin] {e}")
+        print(f"[dlbin] launch error: {e}")
+        return False
+
+    # ── progress polling loop (runs in this thread) ───────────────────────────
+    start_time   = time.time()
+    last_edit    = 0.0
+    prev_size    = 0
+    prev_time    = start_time
+
+    while proc.poll() is None:
+        time.sleep(2)
+        now = time.time()
+
+        try:
+            cur_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        except OSError:
+            cur_size = 0
+
+        # speed over last interval
+        dt = now - prev_time
+        speed_bps = (cur_size - prev_size) / dt if dt > 0 else 0.0
+        prev_size = cur_size
+        prev_time = now
+
+        if now - last_edit >= 3:
+            speed_str = fmt_size(speed_bps) + "/s" if speed_bps >= 100 else "connecting…"
+            elapsed   = int(now - start_time)
+            elapsed_s = f"{elapsed // 60}m {elapsed % 60}s"
+
+            if total_bytes and cur_size:
+                pct = min(int(100 * cur_size / total_bytes), 99)
+                bar = make_bar(int(BAR_DL * cur_size / total_bytes), BAR_DL)
+                status_line = (
+                    f"<code>[{bar}]</code>  <b>{pct}%</b>\n"
+                    f"📥 {fmt_size(cur_size)} / {fmt_size(total_bytes)}\n"
+                    f"⚡ <b>{speed_str}</b>  ·  ⏱ {elapsed_s}"
+                )
+            else:
+                fill = (int(now - start_time) % BAR_DL) + 1
+                bar  = make_bar(fill, BAR_DL)
+                status_line = (
+                    f"<code>[{bar}]</code>  <b>downloading…</b>\n"
+                    f"📥 {fmt_size(cur_size)} received\n"
+                    f"⚡ <b>{speed_str}</b>  ·  ⏱ {elapsed_s}"
+                )
+
+            edit_msg(chat_id, status_msg_id,
+                f"⬇️ <b>Downloading binary…</b>\n\n{status_line}")
+            last_edit = now
+
+    # ── cleanup cookie file ───────────────────────────────────────────────────
+    try:
+        os.remove(cookie_file)
+    except Exception:
+        pass
+
+    # ── validate result ───────────────────────────────────────────────────────
+    ret = proc.returncode
+    if ret != 0:
+        print(f"[dlbin] downloader exited {ret}")
         try:
             os.remove(dest_path)
         except Exception:
             pass
         return False
+
+    size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+    if size < 100 * 1024:
+        print(f"[dlbin] file too small: {size} bytes — likely HTML error page")
+        try:
+            os.remove(dest_path)
+        except Exception:
+            pass
+        edit_msg(chat_id, status_msg_id,
+            "❌ <b>Download failed</b>\n\n"
+            "Google Drive returned an error page instead of the binary.\n"
+            "Please upload the file manually via /localapi.")
+        return False
+
+    try:
+        os.chmod(dest_path, os.stat(dest_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except Exception:
+        pass
+    return True
 
 
 def _localapi_dlbin_receive(message: Message, user_id: int):
@@ -3329,59 +3866,70 @@ def cb_localapi_enter(call: CallbackQuery):
         pass
     sent = send_msg(
         call.message.chat.id,
-        "🔑 <b>Step 1 of 2 — API ID</b>\n\nSend your <b>API ID</b> (numbers only).\n\nSend /cancel to abort.",
+        "🔑 <b>Enter API Credentials</b>\n\n"
+        f"{DIVIDER_SM}\n"
+        "Send both values in one message, separated by a space or newline:\n\n"
+        "<code>API_ID API_HASH</code>\n\n"
+        "<b>Example:</b>\n<code>12345678 0123456789abcdef0123456789abcdef</code>\n\n"
+        f"{DIVIDER_SM}\n"
+        "Get them from <a href='https://my.telegram.org'>my.telegram.org</a> → API development tools\n\n"
+        "Send /cancel to abort.",
+        parse_mode="HTML",
     )
     if sent:
-        bot.register_next_step_handler(sent, _localapi_step1_api_id, user_id)
+        bot.register_next_step_handler(sent, _localapi_credentials_receive, user_id)
 
 
-def _localapi_step1_api_id(message: Message, user_id: int):
+def _localapi_credentials_receive(message: Message, user_id: int):
     if message.text and message.text.strip().lower() in ("/cancel", "cancel"):
         send_msg(message.chat.id, "❌ Cancelled.")
         return
-    raw = "".join((message.text or "").split())
-    if not raw.isdigit():
+    text = (message.text or "").strip()
+    # Support space, newline, or comma as separator
+    parts = re.split(r"[\s,]+", text)
+    parts = [p.strip() for p in parts if p.strip()]
+
+    if len(parts) < 2:
         sent = send_msg(
             message.chat.id,
-            f"⚠️ API ID must be numbers only.\nGot: <code>{safe_escape(raw[:50])}</code>\n\nTry again or /cancel.",
+            "⚠️ <b>Send both on one message.</b>\n\n"
+            "Format: <code>API_ID API_HASH</code>\n"
+            "Example: <code>12345678 0123456789abcdef0123456789abcdef</code>\n\n"
+            "Try again or /cancel.",
         )
         if sent:
-            bot.register_next_step_handler(sent, _localapi_step1_api_id, user_id)
+            bot.register_next_step_handler(sent, _localapi_credentials_receive, user_id)
         return
-    sent = send_msg(
-        message.chat.id,
-        f"✅ API ID: <code>{safe_escape(raw)}</code>\n\n"
-        "🔑 <b>Step 2 of 2 — API Hash</b>\n\nSend your <b>API Hash</b> (32-char hex).\n\nSend /cancel to abort.",
-    )
-    if sent:
-        bot.register_next_step_handler(sent, _localapi_step2_api_hash, user_id, raw)
 
+    api_id_raw = parts[0]
+    api_hash_raw = parts[1].lower()
 
-def _localapi_step2_api_hash(message: Message, user_id: int, api_id: str):
-    if message.text and message.text.strip().lower() in ("/cancel", "cancel"):
-        send_msg(message.chat.id, "❌ Cancelled.")
-        return
-    raw = "".join((message.text or "").split()).lower()
-    if not re.fullmatch(r"[0-9a-f]{32}", raw):
+    errors = []
+    if not api_id_raw.isdigit():
+        errors.append(f"• API ID must be numbers only — got: <code>{safe_escape(api_id_raw[:30])}</code>")
+    if not re.fullmatch(r"[0-9a-f]{32}", api_hash_raw):
+        errors.append(f"• API Hash must be 32 hex chars — got: <code>{safe_escape(api_hash_raw[:40])}</code> ({len(api_hash_raw)} chars)")
+
+    if errors:
         sent = send_msg(
             message.chat.id,
-            f"⚠️ Hash must be 32 hex chars.\nGot: <code>{safe_escape(raw[:50])}</code> ({len(raw)} chars)\n\nTry again or /cancel.",
+            "⚠️ <b>Invalid credentials:</b>\n\n" + "\n".join(errors) +
+            "\n\nFormat: <code>API_ID API_HASH</code>\n\nTry again or /cancel.",
         )
         if sent:
-            bot.register_next_step_handler(
-                sent, _localapi_step2_api_hash, user_id, api_id
-            )
+            bot.register_next_step_handler(sent, _localapi_credentials_receive, user_id)
         return
-    UserManager.save_api_credentials(user_id, api_id, raw)
+
+    UserManager.save_api_credentials(user_id, api_id_raw, api_hash_raw)
     send_msg(
         message.chat.id,
         f"✅ <b>Credentials saved!</b>\n\n"
-        f"🔑 ID    <code>{safe_escape(api_id)}</code>\n"
-        f"🔑 Hash  <code>{'*'*24}{raw[-8:]}</code>\n\n▶ Starting local API…",
+        f"🔑 ID    <code>{safe_escape(api_id_raw)}</code>\n"
+        f"🔑 Hash  <code>{'*' * 24}{api_hash_raw[-8:]}</code>\n\n▶ Starting local API…",
     )
     threading.Thread(
         target=_restart_local_api_with_creds,
-        args=(message.chat.id, user_id, api_id, raw),
+        args=(message.chat.id, user_id, api_id_raw, api_hash_raw),
         daemon=True,
     ).start()
 
@@ -3860,7 +4408,7 @@ def _build_sendfiles_text_and_kb(user_id: int):
     completed = [
         t
         for t in transfers
-        if t["status"] in ("completed", "partial") and t["destination_folder"]
+        if t["status"] in ("completed", "partial", "cancelled") and t["destination_folder"]
     ]
     if not completed:
         return None, None
@@ -3876,8 +4424,9 @@ def _build_sendfiles_text_and_kb(user_id: int):
     buttons = []
     for t in completed[:5]:
         folder = t["destination_folder"]
-        label = f"📁 {folder[:28]}…" if len(folder) > 30 else f"📁 {folder}"
-        buttons.append((label, f"senddir_{user_id}_{folder}"))
+        status_icon = {"completed": "✅", "partial": "⚠️", "cancelled": "⏹"}.get(t["status"], "📁")
+        label_text = f"{folder[:26]}…" if len(folder) > 28 else folder
+        buttons.append((f"{status_icon} {label_text}", f"senddir_{user_id}_{folder}"))
     buttons.append(("🔙 Go Back", f"home_back_{user_id}"))
     return text, _make_kb(buttons)
 
@@ -3891,7 +4440,7 @@ def _do_sendfiles(message_or_obj, user_id: int):
         return
     text, kb = _build_sendfiles_text_and_kb(user_id)
     if text is None:
-        send_msg(chat_id, "⚠️ No completed transfers found.\n\nRun /upload first.")
+        send_msg(chat_id, "⚠️ No transfers found with uploaded files.\n\nRun /upload first, or check that your transfer reached GDrive before cancelling.")
         return
     send_msg(chat_id, text, reply_markup=kb)
 
@@ -4070,22 +4619,138 @@ def _generate_thumbnail(video_path: str, thumb_path: str) -> bool:
     return False
 
 
+def _sf_card_text(user_id: int) -> str:
+    """Re-render the current download/upload progress card from _sf_status."""
+    s = _sf_status.get(user_id)
+    if not s:
+        return "💤 <b>Job finished.</b>"
+    phase    = s.get("phase", "")
+    done_cnt = s.get("done", 0)
+    total_   = s.get("total", 1) or 1
+    sent_    = s.get("sent", 0)
+    skip_    = s.get("skipped", 0)
+    fail_    = s.get("failed", 0)
+    fname    = s.get("filename", "")
+    ob   = make_bar(int(BAR_DL * done_cnt / total_), BAR_DL)
+    opct = int(100 * done_cnt / total_)
+    lines = [
+        "🍀 <b>KEEP CALM I'M UPLOADING YOUR FILES 🍀</b>",
+        "",
+        f"🔹 ←  <code>[{ob}]</code>  {opct}%",
+        "",
+        f"🎴  Progress  {done_cnt}/{total_}   S → {sent_}  P → {skip_}  C → {fail_}",
+        "",
+        DIVIDER_SM,
+    ]
+    if phase == "downloading":
+        byt = s.get("dl_bytes", 0)
+        fsz = s.get("dl_size", 0)
+        spd = s.get("dl_speed_bps", 0)
+        if fsz > 0:
+            pct_ = min(int(byt / fsz * 100), 100)
+            fb, fpct = make_bar(int(BAR_DL * pct_ / 100), BAR_DL), f"{pct_}%"
+            size_info = f"{fmt_size(byt)} / {fmt_size(fsz)}"
+        else:
+            fb, fpct, size_info = EMPTY * BAR_DL, "…", fmt_size(byt) if byt else "—"
+        spd_str = fmt_size(spd) + "/s" if spd else "—"
+        lines += [
+            f"⠿  <b>Downloading</b>  <code>{safe_escape(fname)}</code>",
+            DIVIDER_SM, "",
+            f"🔹 →  <code>[{fb}]</code>  {fpct}",
+            f"🔹 Download · <b>{spd_str}</b>  ←  GDrive",
+            f"🔹 {size_info}",
+        ]
+    elif phase == "uploading":
+        byt = s.get("up_bytes_sent", 0)
+        fsz = s.get("up_size", 0)
+        spd = s.get("up_speed_bps", 0)
+        if fsz > 0:
+            pct_ = min(int(byt / fsz * 100), 100)
+            fb, fpct = make_bar(int(BAR_DL * pct_ / 100), BAR_DL), f"{pct_}%"
+            size_info = f"{fmt_size(byt)} / {fmt_size(fsz)}"
+        else:
+            fb, fpct, size_info = EMPTY * BAR_DL, "…", fmt_size(byt) if byt else "—"
+        spd_str = fmt_size(spd) + "/s" if spd else "—"
+        lines += [
+            f"⠿  <b>Uploading</b>  <code>{safe_escape(fname)}</code>",
+            DIVIDER_SM, "",
+            f"🔹 →  <code>[{fb}]</code>  {fpct}",
+            f"🔹 Upload · <b>{spd_str}</b>  →  Telegram",
+            f"🔹 {size_info}",
+        ]
+    return "\n".join(lines)[:4000]
+
+
+def _sf_card_kb(user_id: int) -> InlineKeyboardMarkup:
+    return _make_kb([
+        ("🔄 Refresh", f"sf_refresh_{user_id}"),
+        ("⏹ Stop",     f"sf_stop_{user_id}"),
+    ])
+
+
 def _send_files_worker(
     chat_id, user_id, folder, files, rclone, cfg, send_as, status_msg_id
 ):
+    import json as _json
+
     tmp_dir = f"/tmp/gdrive_send_{user_id}_{int(time.time())}"
     os.makedirs(tmp_dir, exist_ok=True)
     sent_count = failed_count = skipped_count = 0
-    total = len(files)
+    total      = len(files)
     has_ffmpeg = _ffmpeg_available()
 
-    #* Lightweight speed tracking using /proc/net/dev
-    def _net_bytes() -> int:
-        """Return total TX bytes across all non-loopback interfaces."""
+    # ── shared stop flag ──────────────────────────────────────────────────────
+    # _sf_status[user_id]["stop"] = True  →  worker kills current process immediately
+    _sf_status[user_id] = {
+        "stop": False, "phase": "idle", "filename": "",
+        "done": 0, "total": total,
+        "sent": 0, "skipped": 0, "failed": 0,
+        "dl_bytes": 0, "dl_size": 0, "dl_speed_bps": 0,
+        "up_bytes_sent": 0, "up_size": 0, "up_speed_bps": 0,
+        "start_time": datetime.now(),
+        "_kill_proc": None,   # current subprocess to kill on stop
+    }
+
+    def _should_stop():
+        return _sf_status.get(user_id, {}).get("stop", False)
+
+    def _set_proc(p):
+        """Register the current subprocess so stop can kill it immediately."""
+        if user_id in _sf_status:
+            _sf_status[user_id]["_kill_proc"] = p
+
+    def _clear_proc():
+        if user_id in _sf_status:
+            _sf_status[user_id]["_kill_proc"] = None
+
+    # ── card keyboard (Refresh / Stop) ────────────────────────────────────────
+    card_kb = _sf_card_kb(user_id)
+
+    # ── RX bytes helper for download speed ───────────────────────────────────
+    def _net_rx() -> int:
         try:
             with open("/proc/net/dev") as f:
                 lines = f.readlines()
-            total_tx = 0
+            rx = 0
+            for line in lines[2:]:
+                if ":" not in line:
+                    continue
+                iface, data = line.split(":", 1)
+                if iface.strip() == "lo":
+                    continue
+                vals = data.split()
+                if vals:
+                    rx += int(vals[0])
+            return rx
+        except Exception:
+            return 0
+
+    # ── TX bytes helper for upload speed ─────────────────────────────────────
+    def _net_tx() -> int:
+        try:
+            with open("/proc/net/dev") as f:
+                lines = f.readlines()
+            tx = 0
             for line in lines[2:]:
                 if ":" not in line:
                     continue
@@ -4094,15 +4759,16 @@ def _send_files_worker(
                     continue
                 vals = data.split()
                 if len(vals) >= 9:
-                    total_tx += int(vals[8])
-            return total_tx
+                    tx += int(vals[8])
+            return tx
         except Exception:
             return 0
 
+    # ── plain status card (no progress bars) ─────────────────────────────────
     def _status(phase, filename="", extra=""):
         done = sent_count + failed_count + skipped_count
-        bar = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
-        pct = int(100 * done / total) if total else 0
+        bar  = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
+        pct  = int(100 * done / total) if total else 0
         lines = [
             "🍀 <b>KEEP CALM I'M UPLOADING YOUR FILES 🍀</b>",
             "",
@@ -4111,163 +4777,324 @@ def _send_files_worker(
             f"🎴  Progress  {done}/{total}   S → {sent_count}  P → {skipped_count}  C → {failed_count}",
         ]
         if filename:
-            lines += [
-                "",
-                DIVIDER_SM,
-                f"<b>{phase}</b>  <code>{safe_escape(filename)}</code>",
-                DIVIDER_SM,
-            ]
+            lines += ["", DIVIDER_SM, f"<b>{phase}</b>  <code>{safe_escape(filename)}</code>", DIVIDER_SM]
         if extra:
             lines += ["", extra]
-        edit_msg(chat_id, status_msg_id, "\n".join(lines))
+        edit_msg(chat_id, status_msg_id, "\n".join(lines), reply_markup=card_kb)
 
+    # ── get remote file size via rclone ls (simplest, most reliable) ─────────
+    def _get_remote_size(remote_path: str) -> int:
+        try:
+            r = subprocess.run(
+                [rclone, "--config", cfg, "ls", remote_path],
+                capture_output=True, text=True, timeout=20,
+            )
+            line = r.stdout.strip()
+            if line:
+                parts = line.split(None, 1)
+                if parts:
+                    return int(parts[0])
+        except Exception:
+            pass
+        return 0
+
+    # ── put buttons on card immediately ───────────────────────────────────────
+    try:
+        bot.edit_message_reply_markup(chat_id, status_msg_id, reply_markup=card_kb)
+    except Exception:
+        pass
+
+    # ═════════════════════════════════════════════════════════════════════════
     for i, filename in enumerate(files, 1):
         if not filename.strip():
             continue
 
-        basename = os.path.basename(filename)
+        if _should_stop():
+            _status("⏹ Stopped by user", "")
+            break
+
+        basename    = os.path.basename(filename)
         remote_path = f"GDRIVE:{folder}/{filename}"
-        local_path = os.path.join(tmp_dir, basename)
+        local_path  = os.path.join(tmp_dir, basename)
 
-        #. ── DOWNLOAD with live progress bar ──────────────────────────────────
-        _dl_done = threading.Event()
-        _dl_bytes = [0]  # mutable: bytes received so far
-        _dl_size = [0]  # mutable: total file size (filled from rclone output)
-        _dl_start = time.time()
-        _last_rx = [0]  # net RX bytes at last sample
-        _last_rx_t = [_dl_start]
+        # ── update shared status ──────────────────────────────────────────────
+        def _upd(**kw):
+            if user_id in _sf_status:
+                _sf_status[user_id].update(kw)
 
-        def _net_rx() -> int:
-            """Total RX bytes across non-loopback interfaces."""
-            try:
-                with open("/proc/net/dev") as _f:
-                    _lines = _f.readlines()
-                total_rx = 0
-                for _l in _lines[2:]:
-                    if ":" not in _l:
-                        continue
-                    _iface, _data = _l.split(":", 1)
-                    if _iface.strip() == "lo":
-                        continue
-                    _vals = _data.split()
-                    if len(_vals) >= 1:
-                        total_rx += int(_vals[0])
-                return total_rx
-            except Exception:
-                return 0
+        # ── 1. GET FILE SIZE ──────────────────────────────────────────────────
+        file_total = _get_remote_size(remote_path)
+        _upd(phase="downloading", filename=basename,
+             done=sent_count+failed_count+skipped_count,
+             sent=sent_count, skipped=skipped_count, failed=failed_count,
+             dl_bytes=0, dl_size=file_total, dl_speed_bps=0)
 
-        _last_rx[0] = _net_rx()
+        # ── 2. DOWNLOAD — primary (5 trials) then WebDAV fallback ────────────
+        #
+        # Primary: rclone copyto GDRIVE → local, track via RX counter.
+        # Speed watchdog: if speed stays < 1 MB/s for 10s → kill, count as
+        # a failed trial.  After 5 failed trials → WebDAV fallback.
+        #
+        # WebDAV fallback: spin up `rclone serve webdav GDRIVE:folder` on a
+        # local port, then download via urllib (plain HTTP GET).  This route
+        # bypasses rclone's internal GDrive API throttle entirely.
+        #
+        # RX tracking: bytes_downloaded = rx_now − rx_at_start (kernel counter)
+        # speed = delta_bytes / delta_time  (EMA smoothed)
+        # percent = bytes_downloaded / file_total × 100
 
-        def _dl_spinner(fname=basename, fidx=i):
-            spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        _SPEED_THRESHOLD = 1 * 1024 * 1024   # 1 MB/s
+        _SLOW_WINDOW     = 10.0               # seconds below threshold → trial failed
+        _MAX_TRIALS      = 5
+        _WEBDAV_PORT     = 18900 + (user_id % 1000)  # per-user port
+
+        _dl_done  = threading.Event()
+        _dl_bytes = [0]
+        _dl_start = [time.time()]
+        _dl_method = ["primary"]   # "primary" or "webdav"
+
+        def _dl_spin(fname=basename, fsz=file_total):
+            spinners = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
             idx = 0
+            prev_b, prev_t, spd = 0, time.time(), 0.0
             while not _dl_done.is_set():
-                now = time.time()
-                elapsed = int(now - _dl_start)
-                m2, s2 = divmod(elapsed, 60)
-                estr = f"{m2}m {s2}s" if m2 else f"{s2}s"
+                now  = time.time()
+                byt  = _dl_bytes[0]
+                dt   = now - prev_t
+                if dt >= 1.0:
+                    raw  = max(0, (byt - prev_b) / dt)
+                    spd  = spd * 0.6 + raw * 0.4
+                    prev_b, prev_t = byt, now
+                elapsed = int(now - _dl_start[0])
+                m2, s2  = divmod(elapsed, 60)
+                estr    = f"{m2}m {s2}s" if m2 else f"{s2}s"
                 done_cnt = sent_count + failed_count + skipped_count
-                # Overall batch bar
-                ob = make_bar(int(BAR_DL * done_cnt / total) if total else 0, BAR_DL)
+                ob   = make_bar(int(BAR_DL * done_cnt / total) if total else 0, BAR_DL)
                 opct = int(100 * done_cnt / total) if total else 0
                 spin = spinners[idx % len(spinners)]
-
-                # Per-file download progress
-                cur_rx = _net_rx()
-                dt = now - _last_rx_t[0]
-                if dt >= 1.0:
-                    rx_spd = max(0, (cur_rx - _last_rx[0]) / dt)
-                    _last_rx[0] = cur_rx
-                    _last_rx_t[0] = now
-                else:
-                    rx_spd = 0
-                rx_str = fmt_size(rx_spd) + "/s" if rx_spd > 0 else "—"
-
-                #- File-level progress bar (size-based if known)
-                fsz = _dl_size[0]
-                byt = _dl_bytes[0]
+                spd_str = fmt_size(spd) + "/s" if spd > 0 else "—"
+                method_badge = "" if _dl_method[0] == "primary" else "  <i>(WebDAV)</i>"
                 if fsz > 0:
-                    fp = min(int(byt / fsz * 100), 100)
-                    fb = make_bar(int(BAR_DL * fp / 100), BAR_DL)
+                    fp   = min(int(byt / fsz * 100), 100)
+                    fb   = make_bar(int(BAR_DL * fp / 100), BAR_DL)
                     fpct = f"{fp}%"
+                    size_info = f"{fmt_size(byt)} / {fmt_size(fsz)}"
                 else:
-                    fp = 0
-                    fb = EMPTY * BAR_DL
-                    fpct = "…"
-
+                    fb, fpct, size_info = EMPTY * BAR_DL, "…", fmt_size(byt) if byt else "—"
+                _upd(dl_bytes=byt, dl_size=fsz, dl_speed_bps=int(spd))
                 edit_msg(
-                    chat_id,
-                    status_msg_id,
+                    chat_id, status_msg_id,
                     f"🍀 <b>KEEP CALM I'M UPLOADING YOUR FILES 🍀</b>\n\n"
                     f"🔹 ←  <code>[{ob}]</code>  {opct}%\n\n"
                     f"🎴  Progress  {done_cnt}/{total}   "
                     f"S → {sent_count}  P → {skipped_count}  C → {failed_count}\n\n"
                     f"{DIVIDER_SM}\n"
-                    f"{spin}  <b>Downloading</b>  <code>{safe_escape(fname)}</code>\n"
+                    f"{spin}  <b>Downloading{method_badge}</b>  <code>{safe_escape(fname)}</code>\n"
                     f"{DIVIDER_SM}\n\n"
-                    f"🔹 ←  <code>[{fb}]</code>  {fpct}\n\n"
-                    f"🔹 Download · <b>{rx_str}</b>  ←  GDrive\n\n"
-                    f"🔹 {fmt_size(byt)}{f' / {fmt_size(fsz)}' if fsz else ''}  ·  {estr} elapsed",
+                    f"🔹 →  <code>[{fb}]</code>  {fpct}\n\n"
+                    f"🔹 Download · <b>{spd_str}</b>  ←  GDrive\n\n"
+                    f"🔹 {size_info}  ·  {estr} elapsed",
+                    reply_markup=card_kb,
                 )
                 idx += 1
-                _dl_done.wait(4)
+                _dl_done.wait(5)
+                if _should_stop():
+                    break
 
-        dl_spinner_thread = threading.Thread(target=_dl_spinner, daemon=True)
-        dl_spinner_thread.start()
+        dl_spin_t = threading.Thread(target=_dl_spin, daemon=True)
+        dl_spin_t.start()
 
-        #* Run rclone copyto and parse its --progress stderr for byte counts
-        dl_proc = subprocess.Popen(
-            [
-                rclone,
-                "--config",
-                cfg,
-                "copyto",
-                remote_path,
-                local_path,
-                "--progress",
-                "--stats",
-                "2s",
-                "--stats-one-line",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        def _run_primary_trial(trial_num):
+            """
+            Run one rclone copyto. Returns:
+              True  — completed successfully
+              False — failed or killed by watchdog (too slow)
+              None  — user pressed stop
+            Watchdog: if RECENT speed < 1 MB/s for 10 consecutive seconds → kill.
+            Recent speed = bytes received in the last 2s sample window.
+            """
+            _dl_start[0] = time.time()
+            rx0 = _net_rx()
+            _dl_bytes[0] = 0
 
-        _tf_re = re.compile(r"Transferred:\s+([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+)")
-
-        def _parse_size_to_bytes(s: str) -> int:
-            s = s.strip()
-            m = re.match(r"([\d.]+)\s*([KMGT]?i?B?)", s, re.I)
-            if not m:
-                return 0
-            val, unit = float(m.group(1)), m.group(2).upper().replace("IB", "").replace(
-                "B", ""
-            )
-            mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-            return int(val * mult.get(unit, 1))
-
-        def _dl_reader(p=dl_proc):
             try:
-                for raw in p.stderr:
-                    line = raw.decode(errors="replace")
-                    m = _tf_re.search(line)
-                    if m:
-                        _dl_bytes[0] = _parse_size_to_bytes(m.group(1))
-                        _dl_size[0] = _parse_size_to_bytes(m.group(2))
+                if os.path.exists(local_path):
+                    os.remove(local_path)
             except Exception:
                 pass
 
-        dl_reader_t = threading.Thread(target=_dl_reader, daemon=True)
-        dl_reader_t.start()
-        dl_proc.wait()
-        dl_reader_t.join(timeout=3)
-        _dl_done.set()
-        dl_spinner_thread.join(timeout=2)
+            proc = subprocess.Popen(
+                [rclone, "--config", cfg, "copyto", remote_path, local_path,
+                 "--buffer-size", "128M", "--drive-chunk-size", "64M",
+                 "--transfers", "1", "--drive-acknowledge-abuse"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            _set_proc(proc)
 
-        ok_dl = dl_proc.returncode == 0
-        if not ok_dl or not os.path.exists(local_path):
+            GRACE      = 8.0    # seconds before watchdog activates
+            SAMPLE     = 2.0    # measure speed over this many seconds
+            slow_since = None
+            sample_b   = [0]    # bytes at last sample point
+            sample_t   = [time.time()]
+
+            while proc.poll() is None:
+                if _should_stop():
+                    proc.kill()
+                    _clear_proc()
+                    return None
+
+                time.sleep(0.5)
+                now = time.time()
+                _dl_bytes[0] = max(0, _net_rx() - rx0)
+
+                elapsed = now - _dl_start[0]
+                if elapsed < GRACE:
+                    sample_b[0] = _dl_bytes[0]
+                    sample_t[0] = now
+                    continue
+
+                # Recent speed over last SAMPLE seconds
+                dt = now - sample_t[0]
+                if dt >= SAMPLE:
+                    recent_spd = (_dl_bytes[0] - sample_b[0]) / dt
+                    sample_b[0] = _dl_bytes[0]
+                    sample_t[0] = now
+
+                    if recent_spd < _SPEED_THRESHOLD:
+                        if slow_since is None:
+                            slow_since = now
+                        elif now - slow_since >= _SLOW_WINDOW:
+                            # Slow for 10s — kill trial
+                            print(f"[watchdog] trial {trial_num} speed {fmt_size(recent_spd)}/s < 1MB/s for {_SLOW_WINDOW}s — killing")
+                            proc.kill()
+                            _clear_proc()
+                            _dl_bytes[0] = 0
+                            return False
+                    else:
+                        slow_since = None  # recovered
+
+            _clear_proc()
+
+            if _should_stop():
+                try: os.remove(local_path)
+                except Exception: pass
+                return None
+
+            ok = proc.returncode == 0 and os.path.exists(local_path)
+            if not ok:
+                try: os.remove(local_path)
+                except Exception: pass
+                _dl_bytes[0] = 0
+            return ok
+
+        def _run_webdav():
+            """Fallback: serve GDRIVE via WebDAV, download via urllib."""
+            _dl_method[0] = "webdav"
+            _dl_start[0] = time.time()
+            _dl_bytes[0] = 0
+            _edit_last.pop(status_msg_id, None)  # force refresh on method change
+
+            # Kill any process on the port first
+            try:
+                subprocess.run(["fuser", "-k", f"{_WEBDAV_PORT}/tcp"],
+                               capture_output=True, timeout=5)
+                time.sleep(1)
+            except Exception:
+                pass
+
+            # Start rclone WebDAV server for this folder
+            webdav_proc = subprocess.Popen(
+                [rclone, "--config", cfg,
+                 "serve", "webdav", f"GDRIVE:{folder}",
+                 "--addr", f"127.0.0.1:{_WEBDAV_PORT}",
+                 "--read-only", "--no-modtime",
+                 "--log-level", "ERROR"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+            # Wait for WebDAV to become ready
+            ready = False
+            for _ in range(30):
+                if _should_stop():
+                    webdav_proc.kill()
+                    return False
+                try:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{_WEBDAV_PORT}", timeout=1)
+                    ready = True
+                    break
+                except Exception:
+                    time.sleep(0.5)
+
+            if not ready:
+                webdav_proc.kill()
+                return False
+
+            # Encode filename for URL
+            import urllib.parse as _up
+            url_path = _up.quote(filename)
+            url = f"http://127.0.0.1:{_WEBDAV_PORT}/{url_path}"
+
+            try:
+                import urllib.request as _ur
+                rx0 = _net_rx()
+
+                class _ProgressReporter:
+                    def __init__(self): self.reported = 0
+                    def __call__(self, count, block, total):
+                        _dl_bytes[0] = max(0, _net_rx() - rx0)
+
+                _ur.urlretrieve(url, local_path, reporthook=_ProgressReporter())
+                ok = os.path.exists(local_path) and os.path.getsize(local_path) > 0
+            except Exception as e:
+                print(f"[webdav dl] {e}")
+                ok = False
+            finally:
+                try: webdav_proc.kill()
+                except Exception: pass
+                try:
+                    subprocess.run(["fuser", "-k", f"{_WEBDAV_PORT}/tcp"],
+                                   capture_output=True, timeout=3)
+                except Exception: pass
+
+            return ok
+
+        # ── Run trials ────────────────────────────────────────────────────────
+        dl_ok = False
+        for trial in range(1, _MAX_TRIALS + 1):
+            if _should_stop():
+                break
+            if trial > 1:
+                _edit_last.pop(status_msg_id, None)
+                _status(f"🔄 Retry {trial}/{_MAX_TRIALS} (slow speed)", basename)
+                time.sleep(1)
+
+            result = _run_primary_trial(trial)
+            if result is None:   # user stopped
+                break
+            if result is True:
+                dl_ok = True
+                break
+            # result is False — trial failed, try next
+
+        # If all primary trials failed, try WebDAV
+        if not dl_ok and not _should_stop():
+            _edit_last.pop(status_msg_id, None)
+            _status("🌐 Switching to WebDAV fallback…", basename)
+            time.sleep(1)
+            dl_ok = _run_webdav()
+
+        _dl_done.set()
+        dl_spin_t.join(timeout=2)
+
+        if _should_stop():
+            try: os.remove(local_path)
+            except Exception: pass
+            break
+
+        if not dl_ok or not os.path.exists(local_path):
             failed_count += 1
-            _status("❌ Download failed", filename)
+            _status("❌ Download failed (all methods exhausted)", filename)
             time.sleep(2)
             continue
 
@@ -4278,11 +5105,8 @@ def _send_files_worker(
 
         if file_size > MAX_SEND_BYTES():
             skipped_count += 1
-            _status(
-                "⏭ Skipped — too large",
-                filename,
-                f"<i>{fmt_size(file_size)} > {fmt_size(MAX_SEND_BYTES())} limit</i>",
-            )
+            _status("⏭ Skipped — too large", filename,
+                    f"<i>{fmt_size(file_size)} > {fmt_size(MAX_SEND_BYTES())} limit</i>")
             try:
                 os.remove(local_path)
             except Exception:
@@ -4290,11 +5114,19 @@ def _send_files_worker(
             time.sleep(1)
             continue
 
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if _should_stop():
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+            _status("⏹ Stopped by user", "")
+            break
+
+        ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         is_video = ext in VIDEO_EXTS
         use_video = send_as == "video" and is_video
         thumb_path = None
-        duration = 0
+        duration   = 0
 
         if is_video and has_ffmpeg:
             _status("🎞️ Generating thumbnail", filename)
@@ -4311,50 +5143,48 @@ def _send_files_worker(
             time.sleep(1)
             continue
 
-        #! ── UPLOAD with live progress bar ─────────────────────────────────────
+        # ── 3. UPLOAD ─────────────────────────────────────────────────────────
         _upload_done = threading.Event()
         _upload_start = time.time()
-        _last_tx = [_net_bytes()]
-        _last_tx_time = [_upload_start]
-        _tx_at_start = [_last_tx[0]]  # TX bytes when upload began
+        _tx_start = [_net_tx()]
+        _prev_tx  = [_tx_start[0]]
+        _prev_tx_t = [_upload_start]
 
-        def _spinner(fname=basename, fsize=file_size):
-            spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        _upd(phase="uploading", filename=basename, up_bytes_sent=0,
+             up_size=file_size, up_speed_bps=0)
+
+        def _up_spin(fname=basename, fsize=file_size):
+            spinners = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
             idx = 0
-            _spd = [0.0]  # smoothed speed
+            spd = 0.0
             while not _upload_done.is_set():
-                now = time.time()
+                now     = time.time()
+                cur_tx  = _net_tx()
                 elapsed = int(now - _upload_start)
-                m2, s2 = divmod(elapsed, 60)
-                estr = f"{m2}m {s2}s" if m2 else f"{s2}s"
+                m2, s2  = divmod(elapsed, 60)
+                estr    = f"{m2}m {s2}s" if m2 else f"{s2}s"
+                dt = now - _prev_tx_t[0]
+                if dt >= 1.0:
+                    raw = max(0, (cur_tx - _prev_tx[0]) / dt)
+                    spd = spd * 0.6 + raw * 0.4
+                    _prev_tx[0]  = cur_tx
+                    _prev_tx_t[0] = now
+                bytes_sent = max(0, cur_tx - _tx_start[0])
                 done = sent_count + failed_count + skipped_count
-                ob = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
+                ob   = make_bar(int(BAR_DL * done / total) if total else 0, BAR_DL)
                 opct = int(100 * done / total) if total else 0
                 spin = spinners[idx % len(spinners)]
-
-                # Speed from TX delta
-                cur_tx = _net_bytes()
-                dt = now - _last_tx_time[0]
-                if dt >= 1.0:
-                    raw_spd = max(0, (cur_tx - _last_tx[0]) / dt)
-                    _spd[0] = _spd[0] * 0.6 + raw_spd * 0.4  # EMA smooth
-                    _last_tx[0] = cur_tx
-                    _last_tx_time[0] = now
-                spd_str = fmt_size(_spd[0]) + "/s" if _spd[0] > 0 else "—"
-
-                #* Per-file upload progress bar (bytes sent = TX increase since upload started)
-                bytes_sent = max(0, cur_tx - _tx_at_start[0])
                 if fsize > 0:
                     up_pct = min(int(bytes_sent / fsize * 100), 100)
                     up_bar = make_bar(int(BAR_DL * up_pct / 100), BAR_DL)
                     up_pct_str = f"{up_pct}%"
+                    size_info  = f"{fmt_size(bytes_sent)} / {fmt_size(fsize)}"
                 else:
-                    up_bar = EMPTY * BAR_DL
-                    up_pct_str = "…"
-
+                    up_bar, up_pct_str, size_info = EMPTY * BAR_DL, "…", "—"
+                spd_str = fmt_size(spd) + "/s" if spd > 0 else "—"
+                _upd(up_bytes_sent=bytes_sent, up_speed_bps=int(spd))
                 edit_msg(
-                    chat_id,
-                    status_msg_id,
+                    chat_id, status_msg_id,
                     f"🍀 <b>KEEP CALM I'M UPLOADING YOUR FILES 🍀</b>\n\n"
                     f"🔹 →  <code>[{ob}]</code>  {opct}%\n\n"
                     f"🎴  Progress  {done}/{total}   "
@@ -4364,138 +5194,335 @@ def _send_files_worker(
                     f"{DIVIDER_SM}\n\n"
                     f"🔹 →  <code>[{up_bar}]</code>  {up_pct_str}\n\n"
                     f"🔹 Upload · <b>{spd_str}</b>  →  Telegram\n\n"
-                    f"🔹 {fmt_size(bytes_sent)}{f' / {fmt_size(fsize)}' if fsize else ''}  ·  {estr} elapsed",
+                    f"🔹 {size_info}  ·  {estr} elapsed",
+                    reply_markup=card_kb,
                 )
                 idx += 1
                 _upload_done.wait(5)
+                if _should_stop():
+                    break
 
-        spinner_thread = threading.Thread(target=_spinner, daemon=True)
-        spinner_thread.start()
+        up_spin_t = threading.Thread(target=_up_spin, daemon=True)
+        up_spin_t.start()
+
+        # Bail out before uploading if stop was pressed
+        if _should_stop():
+            _upload_done.set()
+            up_spin_t.join(timeout=2)
+            try: os.remove(local_path)
+            except Exception: pass
+            break
 
         try:
-            with open(local_path, "rb") as f:
-                thumb_fh = open(thumb_path, "rb") if thumb_path else None
-                try:
-                    if use_video:
-                        kwargs = dict(
-                            chat_id=chat_id,
-                            video=f,
-                            caption=caption,
-                            parse_mode="HTML",
-                            supports_streaming=True,
-                            duration=duration or None,
-                            timeout=3600,
-                        )
-                        if thumb_fh:
-                            kwargs["thumbnail"] = thumb_fh
-                        try:
-                            bot.send_video(**kwargs)
-                        except TypeError:
-                            if thumb_fh:
-                                thumb_fh.seek(0)
-                                kwargs.pop("thumbnail", None)
-                                kwargs["thumb"] = thumb_fh
-                            bot.send_video(**kwargs)
-                    else:
-                        kwargs = dict(
-                            chat_id=chat_id,
-                            document=f,
-                            caption=caption,
-                            parse_mode="HTML",
-                            timeout=3600,
-                        )
-                        if thumb_fh:
-                            kwargs["thumbnail"] = thumb_fh
-                        try:
-                            bot.send_document(**kwargs)
-                        except TypeError:
-                            if thumb_fh:
-                                thumb_fh.seek(0)
-                                kwargs.pop("thumbnail", None)
-                                kwargs["thumb"] = thumb_fh
-                            bot.send_document(**kwargs)
-                finally:
-                    if thumb_fh:
-                        thumb_fh.close()
+            action = "upload_video" if use_video else "upload_document"
+            bot.send_chat_action(chat_id, action)
+        except Exception:
+            pass
 
-            sent_count += 1
-            #. FIX 3: thumbs-up emoji as separate message (no sticker per file — only at the end)
+        # Run the actual Telegram upload in a thread so stop can cancel immediately
+        _upload_result = [None]   # True=sent, False=failed, None=cancelled
+        _upload_exc    = [None]
+
+        def _do_upload():
             try:
-                bot.send_sticker(
-                    chat_id,
-                    "CAACAgEAAxkBAAIZWWfbz7HRAAG_TpNxVjPxUAcU4tcibgACpQADHRnARCfGLhsFn5OdNgQ",
+                with open(local_path, "rb") as f:
+                    thumb_fh = open(thumb_path, "rb") if thumb_path else None
+                    try:
+                        if use_video:
+                            kwargs = dict(chat_id=chat_id, video=f, caption=caption,
+                                          parse_mode="HTML", supports_streaming=True,
+                                          duration=duration or None, timeout=3600,
+                                          connect_timeout=30)
+                            if thumb_fh:
+                                kwargs["thumbnail"] = thumb_fh
+                            try:
+                                bot.send_video(**kwargs)
+                            except TypeError:
+                                if thumb_fh: thumb_fh.seek(0)
+                                kwargs.pop("thumbnail", None)
+                                kwargs.pop("connect_timeout", None)
+                                if thumb_fh: kwargs["thumb"] = thumb_fh
+                                bot.send_video(**kwargs)
+                        else:
+                            kwargs = dict(chat_id=chat_id, document=f, caption=caption,
+                                          parse_mode="HTML", timeout=3600,
+                                          connect_timeout=30)
+                            if thumb_fh:
+                                kwargs["thumbnail"] = thumb_fh
+                            try:
+                                bot.send_document(**kwargs)
+                            except TypeError:
+                                if thumb_fh: thumb_fh.seek(0)
+                                kwargs.pop("thumbnail", None)
+                                kwargs.pop("connect_timeout", None)
+                                if thumb_fh: kwargs["thumb"] = thumb_fh
+                                bot.send_document(**kwargs)
+                    finally:
+                        if thumb_fh: thumb_fh.close()
+                _upload_result[0] = True
+            except Exception as e:
+                _upload_exc[0] = e
+                _upload_result[0] = False
+
+        upload_thread = threading.Thread(target=_do_upload, daemon=True)
+        upload_thread.start()
+
+        # Poll until upload finishes OR stop is pressed
+        while upload_thread.is_alive():
+            upload_thread.join(timeout=1.0)
+            if _should_stop():
+                # Can't kill an HTTP thread, but we stop counting it and move on.
+                # The daemon thread will die when the process exits or times out.
+                _upload_done.set()
+                up_spin_t.join(timeout=2)
+                try: os.remove(local_path)
+                except Exception: pass
+                if thumb_path:
+                    try: os.remove(thumb_path)
+                    except Exception: pass
+                # Clean up remaining files in tmp_dir
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                os.makedirs(tmp_dir, exist_ok=True)
+                # Update status card and exit
+                was_stopped = True
+                _sf_status[user_id]["stop"] = True
+                try: bot.delete_message(chat_id, status_msg_id)
+                except Exception: pass
+                _sf_status.pop(user_id, None)
+                send_msg(chat_id,
+                    f"⏹ <b>Stopped</b>\n\n{DIVIDER_SM}\n"
+                    f"Sent       →  <b>{sent_count}</b>\n"
+                    f"Skipped  →  <b>{skipped_count}</b>\n"
+                    f"Failed     →  <b>{failed_count}</b>\n"
+                    f"{DIVIDER_SM}\nGD: <code>{safe_escape(folder)}</code>",
+                    reply_markup=_back_home_kb(user_id),
                 )
-            except Exception:
-                pass
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return   # exit worker immediately
 
-        except Exception as e:
+        _upload_done.set()
+        up_spin_t.join(timeout=2)
+
+        if _upload_result[0] is True:
+            sent_count += 1
+        else:
             failed_count += 1
-            print(f"[upload] {filename}: {e}")
-            _status("❌ Upload failed", filename, f"<i>{safe_escape(str(e)[:200])}</i>")
+            err = str(_upload_exc[0])[:200] if _upload_exc[0] else "unknown"
+            print(f"[upload] {filename}: {err}")
+            _status("❌ Upload failed", filename, f"<i>{safe_escape(err)}</i>")
             time.sleep(2)
-        finally:
-            _upload_done.set()
-            spinner_thread.join(timeout=2)
-            try:
-                os.remove(local_path)
-            except Exception:
-                pass
-            if thumb_path:
-                try:
-                    os.remove(thumb_path)
-                except Exception:
-                    pass
+
+        # clean up local files
+        try: os.remove(local_path)
+        except Exception: pass
+        if thumb_path:
+            try: os.remove(thumb_path)
+            except Exception: pass
         time.sleep(0.3)
+    # ═══════════════════════════════════════════════════════════════════════════
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    all_ok = sent_count == total and failed_count == 0
-    has_skipped = skipped_count > 0
-    has_failed = failed_count > 0
-    total_files = sent_count + skipped_count + failed_count
-    outcome = (
-        "All files sent successfully."
-        if all_ok
-        else ("Completed with some issues." if has_failed or has_skipped else "Done.")
-    )
+    was_stopped = _sf_status.get(user_id, {}).get("stop", False)
+    _sf_status.pop(user_id, None)
 
-    notes = ""
-    if has_skipped:
-        notes += (
-            f"\n\n<i>{skipped_count} file(s) exceeded the current upload limit "
-            f"({fmt_size(MAX_SEND_BYTES())}). "
-            f"Use /localapi to raise the limit to 2 GB.</i>"
-        )
-    if has_failed:
-        notes += (
-            f"\n\n<i>{failed_count} file(s) failed. "
-            f"Run /sendfiles again to retry.</i>"
-        )
-
-    #$ Delete the live progress card — replaced by the completion message below
     try:
         bot.delete_message(chat_id, status_msg_id)
     except Exception:
         pass
 
-    #$ Send as a NEW message so the notification pops and user knows transfer is complete
+    total_files = sent_count + skipped_count + failed_count
+
+    if was_stopped:
+        send_msg(
+            chat_id,
+            f"⏹ <b>Stopped</b>\n\n"
+            f"{DIVIDER_SM}\n"
+            f"Sent       →  <b>{sent_count}</b>\n"
+            f"Skipped  →  <b>{skipped_count}</b>\n"
+            f"Failed     →  <b>{failed_count}</b>\n"
+            f"{DIVIDER_SM}\n"
+            f"GD: <code>{safe_escape(folder)}</code>",
+            reply_markup=_back_home_kb(user_id),
+        )
+        return
+
+    all_ok      = sent_count == total and failed_count == 0
+    has_skipped = skipped_count > 0
+    has_failed  = failed_count > 0
+    outcome = (
+        "All files sent successfully."
+        if all_ok
+        else ("Completed with some issues." if has_failed or has_skipped else "Done.")
+    )
+    notes = ""
+    if has_skipped:
+        notes += (
+            f"\n\n<i>{skipped_count} file(s) exceeded the current upload limit "
+            f"({fmt_size(MAX_SEND_BYTES())}). Use /localapi to raise the limit to 2 GB.</i>"
+        )
+    if has_failed:
+        notes += f"\n\n<i>{failed_count} file(s) failed. Run /sendfiles again to retry.</i>"
+
     send_msg(
         chat_id,
-        f"<b>Transfer Complete</b>\n"
-        f"{outcome}\n\n"
+        f"<b>Transfer Complete</b>\n{outcome}\n\n"
         f"{DIVIDER_SM}\n"
         f"Sent       →  <b>{sent_count}</b>\n"
         f"Skipped  →  <b>{skipped_count}</b>  <i>(too large)</i>\n"
         f"Failed     →  <b>{failed_count}</b>\n"
         f"Total       →  <b>{total_files}</b> file{'s' if total_files != 1 else ''}\n"
         f"{DIVIDER_SM}\n"
-        f"GD: <code>{safe_escape(folder)}</code>"
-        f"{notes}",
+        f"GD: <code>{safe_escape(folder)}</code>{notes}",
         reply_markup=_back_home_kb(user_id),
+    )
+    if all_ok:
+        try:
+            time.sleep(1.5)
+            bot.send_sticker(
+                chat_id,
+                "CAACAgEAAxkBAAIZWWfbz7HRAAG_TpNxVjPxUAcU4tcibgACpQADHRnARCfGLhsFn5OdNgQ",
+            )
+        except Exception:
+            pass
+
+
+
+#. ─── /ustatus────────────────────────────────────────────────────────────────────
+
+
+@bot.message_handler(commands=["ustatus"])
+def cmd_ustatus(message: Message):
+    user_id = message.from_user.id
+    s = _sf_status.get(user_id)
+    if not s or s.get("phase") == "idle":
+        send_msg(
+            message.chat.id,
+            "💤 <b>No active send job.</b>\n\nUse /sendfiles to start one.",
+            reply_markup=_back_home_kb(user_id),
+        )
+        return
+    sent = send_msg(
+        message.chat.id,
+        _sf_status_text(user_id),
+        reply_markup=_sf_ustatus_kb(user_id),
+    )
+    if sent:
+        # Store so we can edit it on refresh
+        if user_id in _sf_status:
+            _sf_status[user_id]["ustatus_chat"] = message.chat.id
+            _sf_status[user_id]["ustatus_msg"] = sent.message_id
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ustatus_refresh_"))
+def cb_ustatus_refresh(call: CallbackQuery):
+    user_id = int(call.data.split("_")[2])
+    try:
+        bot.answer_callback_query(call.id, "🔄 Refreshed!")
+    except Exception:
+        pass
+    s = _sf_status.get(user_id)
+    if not s or s.get("phase") == "idle":
+        try:
+            bot.edit_message_text(
+                "💤 <b>Send job finished.</b>",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="HTML",
+                reply_markup=_back_home_kb(user_id),
+            )
+        except Exception:
+            pass
+        return
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        _sf_status_text(user_id),
+        reply_markup=_sf_ustatus_kb(user_id),
     )
 
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ustatus_stop_"))
+def cb_ustatus_stop(call: CallbackQuery):
+    user_id = int(call.data.split("_")[2])
+    try:
+        bot.answer_callback_query(call.id, "⏹ Stopping send job…")
+    except Exception:
+        pass
+    if user_id in _sf_status:
+        _sf_status[user_id]["stop"] = True
+        proc = _sf_status[user_id].get("_kill_proc")
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        bot.edit_message_text(
+            "⏹ <b>Stopped.</b>\n\nAll operations cancelled immediately.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
 #. ─── /history ────────────────────────────────────────────────────────────────────
+
+
+#* ─── Sendfiles inline card buttons (Refresh / Stop) ─────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sf_refresh_"))
+def cb_sf_refresh(call: CallbackQuery):
+    user_id = int(call.data.split("_")[2])
+    try:
+        bot.answer_callback_query(call.id, "🔄 Refreshed!")
+    except Exception:
+        pass
+    if user_id not in _sf_status:
+        try:
+            bot.edit_message_reply_markup(
+                call.message.chat.id, call.message.message_id, reply_markup=None
+            )
+        except Exception:
+            pass
+        return
+    edit_msg(
+        call.message.chat.id,
+        call.message.message_id,
+        _sf_card_text(user_id),
+        reply_markup=_sf_card_kb(user_id),
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sf_stop_"))
+def cb_sf_stop(call: CallbackQuery):
+    user_id = int(call.data.split("_")[2])
+    try:
+        bot.answer_callback_query(call.id, "⏹ Stopping…")
+    except Exception:
+        pass
+    if user_id in _sf_status:
+        _sf_status[user_id]["stop"] = True
+        # Kill current subprocess immediately
+        proc = _sf_status[user_id].get("_kill_proc")
+        if proc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        bot.edit_message_text(
+            "⏹ <b>Stopped.</b>\n\nAll operations cancelled immediately.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
 
 
 def _parse_dt(value):
@@ -4539,6 +5566,7 @@ def set_commands():
                 telebot.types.BotCommand(
                     "sendfiles", "📤 Send GDrive files to Telegram"
                 ),
+                telebot.types.BotCommand("ustatus", "📡 Live sendfiles progress card"),
                 telebot.types.BotCommand("settings", "⚙️ Upload type & preferences"),
                 telebot.types.BotCommand(
                     "localapi", "🖥 Setup local API for 2 GB uploads"
