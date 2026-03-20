@@ -411,6 +411,61 @@ def _boot_local_api() -> bool:
         return False
 
 
+def _silent_download_bin():
+    """Download the telegram-bot-api binary silently in the background if missing."""
+    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
+    if os.path.isfile(dest) and os.path.getsize(dest) > 100 * 1024:
+        return  # already have it
+    print("⏳ telegram-bot-api binary not found — downloading silently…")
+    try:
+        install_package("requests")
+        import requests
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+        file_id = "1ti94G9SFsLec2zMn08RoQ5EhgGVJoDiA"
+        probe = session.get(
+            f"https://drive.google.com/uc?export=download&id={file_id}",
+            allow_redirects=True, timeout=30
+        )
+        ct = probe.headers.get("Content-Type", "")
+        if "text/html" in ct:
+            confirm = None
+            m = re.search(r'name="confirm"\s+value="([^"]+)"', probe.text)
+            if m:
+                confirm = m.group(1)
+            if not confirm:
+                m = re.search(r'[?&]confirm=([0-9A-Za-z_-]+)', probe.text)
+                if m:
+                    confirm = m.group(1)
+            if not confirm:
+                confirm = session.cookies.get("download_warning") or "t"
+            url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={confirm}"
+            resp = session.get(url, stream=True, timeout=60)
+        else:
+            resp = probe  # already got the file
+        resp.raise_for_status()
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        size = os.path.getsize(dest)
+        if size < 100 * 1024:
+            os.remove(dest)
+            print("⚠️ Binary download failed — file too small (GDrive error page?)")
+            return
+        os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        global LOCAL_API_BIN
+        LOCAL_API_BIN = dest
+        print(f"✓ telegram-bot-api downloaded ({fmt_size(size)})")
+    except Exception as e:
+        print(f"⚠️ Silent binary download failed: {e}")
+
+
+# Start silent download in background immediately
+threading.Thread(target=_silent_download_bin, daemon=True).start()
+
+
 _using_local_api = _boot_local_api()
 bot = make_bot(_using_local_api)
 
@@ -3454,16 +3509,18 @@ _GUIDE_TEXT = (
 
 def _build_localapi_text_and_kb(user_id: int):
     api_id, api_hash = UserManager.get_api_credentials(user_id)
+    bin_ready = os.path.isfile(LOCAL_API_BIN) and os.path.getsize(LOCAL_API_BIN) > 100 * 1024
+
     if _using_local_api:
         status = "🟢 <b>Local API is RUNNING</b>  ·  2 GB uploads active."
-    elif os.path.isfile(LOCAL_API_BIN):
+    elif bin_ready:
         status = (
-            "🟡 <b>Binary found, credentials saved</b>  ·  server not running."
+            "🟡 <b>Ready</b>  ·  credentials saved, server not running."
             if api_id and api_hash
-            else "🔴 <b>Binary found, but no credentials saved.</b>"
+            else "🟡 <b>Binary ready</b>  ·  enter credentials to start."
         )
     else:
-        status = "🔴 <b>Binary not found.</b>\n\nUse the button below to download it."
+        status = "⏳ <b>Binary downloading in background…</b>  Enter credentials now — server will start once ready."
 
     creds_line = ""
     if api_id:
@@ -3482,11 +3539,9 @@ def _build_localapi_text_and_kb(user_id: int):
 
     buttons = [
         ("📖 How to get credentials", f"localapi_guide_{user_id}"),
-        ("⬇️ Download binary", f"localapi_dlbin_{user_id}"),
+        ("🔑 Enter credentials",      f"localapi_enter_{user_id}"),
     ]
-    if os.path.isfile(LOCAL_API_BIN):
-        buttons.append(("🔑 Enter credentials", f"localapi_enter_{user_id}"))
-    if api_id and api_hash and os.path.isfile(LOCAL_API_BIN) and not _using_local_api:
+    if api_id and api_hash and not _using_local_api:
         buttons.append(("▶ Start Local API", f"localapi_start_{user_id}"))
     if _using_local_api:
         buttons.append(("🔄 Restart Local API", f"localapi_start_{user_id}"))
@@ -3544,317 +3599,8 @@ def cb_localapi_back(call: CallbackQuery):
     )
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_dlbin_"))
-def cb_localapi_dlbin(call: CallbackQuery):
-    user_id = int(call.data.split("_")[-1])
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
-
-    # Binary already exists — ask whether to replace or keep it
-    if os.path.isfile(dest) and os.path.getsize(dest) > 100 * 1024:
-        size = fmt_size(os.path.getsize(dest))
-        kb = _make_kb([
-            ("🔄 Replace it", f"localapi_dlbin_replace_{user_id}"),
-            ("✅ Keep existing", f"localapi_back_{user_id}"),
-        ])
-        edit_msg(
-            call.message.chat.id,
-            call.message.message_id,
-            f"⚠️ <b>Binary already exists</b>\n\n{DIVIDER_SM}\n"
-            f"📁 <code>{safe_escape(dest)}</code>\n"
-            f"💾 {size}\n\n"
-            "Replace it or keep the existing one?",
-            reply_markup=kb,
-        )
-        return
-
-    _start_binary_download(call.message.chat.id, call.message.message_id, user_id, dest)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_dlbin_replace_"))
-def cb_localapi_dlbin_replace(call: CallbackQuery):
-    user_id = int(call.data.split("_")[-1])
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
-    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
-    try:
-        os.remove(dest)
-    except Exception:
-        pass
-    _start_binary_download(call.message.chat.id, call.message.message_id, user_id, dest)
-
-
-def _start_binary_download(chat_id: int, mid: int, user_id: int, dest: str):
-    edit_msg(
-        chat_id, mid,
-        f"⬇️ <b>Downloading telegram-bot-api binary…</b>\n\n{DIVIDER_SM}\n"
-        "Fetching from Google Drive, please wait…",
-    )
-    threading.Thread(
-        target=lambda: _finish_binary_download(
-            chat_id,
-            user_id,
-            mid,
-            _download_binary(GDRIVE_DIRECT_DL, dest, mid, chat_id),
-            dest,
-        ),
-        daemon=True,
-    ).start()
-
-
-def _gdrive_direct_url(share_url: str) -> str:
-    m = re.search(r"/d/([a-zA-Z0-9_-]{20,})", share_url)
-    if not m:
-        m = re.search(r"[?&]id=([a-zA-Z0-9_-]{20,})", share_url)
-    if not m:
-        return share_url
-    return f"https://drive.google.com/uc?export=download&id={m.group(1)}&confirm=t"
-
-
-def _download_binary(
-    url: str, dest_path: str, status_msg_id: int, chat_id: int
-) -> bool:
-    """
-    Download binary using curl or wget subprocess — the only reliable way to handle
-    GDrive's multi-step cookie/redirect confirmation flow.
-    Progress is tracked by polling the growing output file size in a side thread.
-    """
-    os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-
-    # ── pick downloader ───────────────────────────────────────────────────────
-    curl_bin  = shutil.which("curl")
-    wget_bin  = shutil.which("wget")
-
-    if not curl_bin and not wget_bin:
-        edit_msg(chat_id, status_msg_id,
-            "❌ <b>curl / wget not found.</b>\n\nPlease upload the binary manually via /localapi.")
-        return False
-
-    # ── build command ─────────────────────────────────────────────────────────
-    if curl_bin:
-        # -L  follow redirects   -J  use server filename   -b/-c  cookie jar
-        # --insecure in case of cert issues on some VPS
-        cookie_file = dest_path + ".cookies"
-        cmd = [
-            curl_bin,
-            "-L",                        # follow all redirects
-            "-c", cookie_file,           # save cookies
-            "-b", cookie_file,           # send cookies back (handles GDrive confirm)
-            "--retry", "3",
-            "--retry-delay", "2",
-            "--connect-timeout", "20",
-            "--max-time", "600",
-            "-o", dest_path,
-            url,
-        ]
-    else:
-        cookie_file = dest_path + ".cookies"
-        cmd = [
-            wget_bin,
-            "--load-cookies", cookie_file,
-            "--save-cookies", cookie_file,
-            "--keep-session-cookies",
-            "--no-check-certificate",
-            "--tries=3",
-            "--timeout=20",
-            "--waitretry=2",
-            "-O", dest_path,
-            url,
-        ]
-
-    # ── get total size via HEAD first (best-effort) ───────────────────────────
-    total_bytes = 0
-    if curl_bin:
-        try:
-            head = subprocess.run(
-                [curl_bin, "-sI", "-L", "--max-time", "10", url],
-                capture_output=True, text=True, timeout=15
-            )
-            for line in head.stdout.splitlines():
-                if line.lower().startswith("content-length:"):
-                    total_bytes = int(line.split(":", 1)[1].strip())
-                    break
-        except Exception:
-            pass
-
-    # ── launch download process ───────────────────────────────────────────────
-    try:
-        # ensure cookie file exists (wget needs it)
-        open(cookie_file, "a").close()
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"[dlbin] launch error: {e}")
-        return False
-
-    # ── progress polling loop (runs in this thread) ───────────────────────────
-    start_time   = time.time()
-    last_edit    = 0.0
-    prev_size    = 0
-    prev_time    = start_time
-
-    while proc.poll() is None:
-        time.sleep(2)
-        now = time.time()
-
-        try:
-            cur_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-        except OSError:
-            cur_size = 0
-
-        # speed over last interval
-        dt = now - prev_time
-        speed_bps = (cur_size - prev_size) / dt if dt > 0 else 0.0
-        prev_size = cur_size
-        prev_time = now
-
-        if now - last_edit >= 3:
-            speed_str = fmt_size(speed_bps) + "/s" if speed_bps >= 100 else "connecting…"
-            elapsed   = int(now - start_time)
-            elapsed_s = f"{elapsed // 60}m {elapsed % 60}s"
-
-            if total_bytes and cur_size:
-                pct = min(int(100 * cur_size / total_bytes), 99)
-                bar = make_bar(int(BAR_DL * cur_size / total_bytes), BAR_DL)
-                status_line = (
-                    f"<code>[{bar}]</code>  <b>{pct}%</b>\n"
-                    f"📥 {fmt_size(cur_size)} / {fmt_size(total_bytes)}\n"
-                    f"⚡ <b>{speed_str}</b>  ·  ⏱ {elapsed_s}"
-                )
-            else:
-                fill = (int(now - start_time) % BAR_DL) + 1
-                bar  = make_bar(fill, BAR_DL)
-                status_line = (
-                    f"<code>[{bar}]</code>  <b>downloading…</b>\n"
-                    f"📥 {fmt_size(cur_size)} received\n"
-                    f"⚡ <b>{speed_str}</b>  ·  ⏱ {elapsed_s}"
-                )
-
-            edit_msg(chat_id, status_msg_id,
-                f"⬇️ <b>Downloading binary…</b>\n\n{status_line}")
-            last_edit = now
-
-    # ── cleanup cookie file ───────────────────────────────────────────────────
-    try:
-        os.remove(cookie_file)
-    except Exception:
-        pass
-
-    # ── validate result ───────────────────────────────────────────────────────
-    ret = proc.returncode
-    if ret != 0:
-        print(f"[dlbin] downloader exited {ret}")
-        try:
-            os.remove(dest_path)
-        except Exception:
-            pass
-        return False
-
-    size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-    if size < 100 * 1024:
-        print(f"[dlbin] file too small: {size} bytes — likely HTML error page")
-        try:
-            os.remove(dest_path)
-        except Exception:
-            pass
-        edit_msg(chat_id, status_msg_id,
-            "❌ <b>Download failed</b>\n\n"
-            "Google Drive returned an error page instead of the binary.\n"
-            "Please upload the file manually via /localapi.")
-        return False
-
-    try:
-        os.chmod(dest_path, os.stat(dest_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except Exception:
-        pass
-    return True
-
-
-def _localapi_dlbin_receive(message: Message, user_id: int):
-    if message.text and message.text.strip().lower() in ("/cancel", "cancel"):
-        send_msg(message.chat.id, "❌ Cancelled.")
-        return
-    chat_id = message.chat.id
-    dest = os.path.join(SCRIPT_DIR, "telegram-bot-api")
-
-    if message.content_type == "document":
-        status = send_msg(message.chat.id, "⬇️ <b>Downloading uploaded file…</b>")
-        try:
-            import json as _json
-
-            fid = message.document.file_id
-            r = urllib.request.urlopen(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={fid}",
-                timeout=15,
-            )
-            fp = _json.loads(r.read())["result"]["file_path"]
-            ok = _download_binary(
-                f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}",
-                dest,
-                status.message_id if status else 0,
-                chat_id,
-            )
-        except Exception as e:
-            ok = False
-            print(f"[dlbin upload] {e}")
-        _finish_binary_download(
-            chat_id, user_id, status.message_id if status else 0, ok, dest
-        )
-        return
-
-    url = (message.text or "").strip()
-    if not url.startswith("http"):
-        sent = send_msg(
-            message.chat.id,
-            "⚠️ That doesn't look like a URL.\nSend a link or upload the binary.\n\nSend /cancel to abort.",
-        )
-        if sent:
-            bot.register_next_step_handler(sent, _localapi_dlbin_receive, user_id)
-        return
-
-    status = send_msg(message.chat.id, "⬇️ <b>Starting download…</b>")
-    threading.Thread(
-        target=lambda: _finish_binary_download(
-            chat_id,
-            user_id,
-            status.message_id if status else 0,
-            _download_binary(url, dest, status.message_id if status else 0, chat_id),
-            dest,
-        ),
-        daemon=True,
-    ).start()
-
-
-def _finish_binary_download(chat_id, user_id, status_msg_id, ok, dest):
-    global LOCAL_API_BIN
-    if not ok:
-        if status_msg_id:
-            edit_msg(
-                chat_id,
-                status_msg_id,
-                "❌ <b>Download failed.</b>\n\nCheck the link and try again via /localapi.",
-            )
-        return
-    LOCAL_API_BIN = dest
-    size = os.path.getsize(dest)
-    if status_msg_id:
-        edit_msg(
-            chat_id,
-            status_msg_id,
-            f"✅ <b>Binary downloaded!</b>\n\n"
-            f"📁  <code>{safe_escape(dest)}</code>\n"
-            f"💾  {fmt_size(size)}\n\nUse /localapi to enter credentials and start the server.",
-        )
-    api_id, api_hash = UserManager.get_api_credentials(user_id)
-    if api_id and api_hash:
-        kb = _make_kb([("▶ Start Local API now", f"localapi_start_{user_id}")])
-        send_msg(
-            chat_id, "🔑 Credentials already saved. Start the server?", reply_markup=kb
-        )
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_enter_"))
@@ -3921,49 +3667,73 @@ def _localapi_credentials_receive(message: Message, user_id: int):
         return
 
     UserManager.save_api_credentials(user_id, api_id_raw, api_hash_raw)
-    send_msg(
+    # Send a dedicated status message — never edit anything else
+    status = send_msg(
         message.chat.id,
-        f"✅ <b>Credentials saved!</b>\n\n"
-        f"🔑 ID    <code>{safe_escape(api_id_raw)}</code>\n"
-        f"🔑 Hash  <code>{'*' * 24}{api_hash_raw[-8:]}</code>\n\n▶ Starting local API…",
+        f"⏳ <b>Starting local API…</b>",
     )
     threading.Thread(
         target=_restart_local_api_with_creds,
-        args=(message.chat.id, user_id, api_id_raw, api_hash_raw),
+        args=(message.chat.id, user_id, api_id_raw, api_hash_raw,
+              status.message_id if status else None),
         daemon=True,
     ).start()
 
 
-def _restart_local_api_with_creds(chat_id, user_id, api_id, api_hash):
-    global _using_local_api
-    import telebot.apihelper as _ah
+_restart_lock = threading.Lock()
 
-    stop_local_api()
-    time.sleep(1)
-    success = start_local_api(BOT_TOKEN, api_id=api_id, api_hash=api_hash)
-    if success:
-        _ah.API_URL = f"http://127.0.0.1:{LOCAL_API_PORT}/bot{{0}}/{{1}}"
-        _using_local_api = True
-        send_msg(
-            chat_id,
-            f"🎉 <b>Local Bot API is RUNNING!</b>\n\n{DIVIDER_SM}\n"
-            f"📦  Upload limit  <b>2 GB</b>\n"
-            f"🖥   Server port   <code>{LOCAL_API_PORT}</code>\n\n"
-            "Use /sendfiles to receive large video files.",
-        )
-    else:
-        _ah.API_URL = "https://api.telegram.org/bot{0}/{1}"
-        _using_local_api = False
-        log_file = os.path.join(SCRIPT_DIR, "tg_api_data", "server.log")
+def _restart_local_api_with_creds(chat_id, user_id, api_id, api_hash, status_msg_id=None):
+    global _using_local_api
+
+    if not _restart_lock.acquire(blocking=False):
+        if status_msg_id:
+            try:
+                bot.edit_message_text("⚠️ <b>Already starting, please wait…</b>",
+                    chat_id, status_msg_id, parse_mode="HTML")
+            except Exception:
+                pass
+        return
+
+    try:
+        stop_local_api()
+        time.sleep(1)
+        success = start_local_api(BOT_TOKEN, api_id=api_id, api_hash=api_hash)
+
+        if success:
+            _using_local_api = True
+            result_text = (
+                f"🎉 <b>Local Bot API is RUNNING!</b>\n\n{DIVIDER_SM}\n"
+                f"📦  Upload limit  <b>2 GB</b>\n"
+                f"🖥   Server port   <code>{LOCAL_API_PORT}</code>\n\n"
+                "⏳ Restarting bot to apply changes…"
+            )
+        else:
+            _using_local_api = False
+            log_file = os.path.join(SCRIPT_DIR, "tg_api_data", "server.log")
+            try:
+                tail = open(log_file).read()[-400:].strip()
+            except Exception:
+                tail = "(no log)"
+            result_text = (
+                f"❌ <b>Local API failed to start.</b>\n\n"
+                f"<pre>{safe_escape(tail)}</pre>\n\nUse /localapi to retry."
+            )
+
+        # Send result via official API — never switch URL mid-polling
         try:
-            tail = open(log_file).read()[-600:].strip()
+            bot.edit_message_text(result_text, chat_id, status_msg_id, parse_mode="HTML")
         except Exception:
-            tail = "(no log)"
-        send_msg(
-            chat_id,
-            f"❌ <b>Local API failed to start.</b>\n\n"
-            f"<b>Log:</b>\n<pre>{safe_escape(tail[-400:])}</pre>\n\nUse /localapi to retry.",
-        )
+            pass
+
+        if success:
+            # Give Telegram a moment to deliver the message, then restart the process
+            # cleanly so the new bot instance starts polling via local API from scratch.
+            # Hot-switching _ah.API_URL mid-polling causes double-update loops.
+            time.sleep(2)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    finally:
+        _restart_lock.release()
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("localapi_start_"))
@@ -3977,13 +3747,15 @@ def cb_localapi_start(call: CallbackQuery):
     if not api_id or not api_hash:
         send_msg(
             call.message.chat.id,
-            "❌ No credentials. Use /localapi → Enter credentials first.",
+            "❌ No credentials saved. Use /localapi → Enter credentials first.",
         )
         return
-    send_msg(call.message.chat.id, "⏳ Starting local Bot API server…")
+    # Send a fresh dedicated message — never touch the localapi card
+    status = send_msg(call.message.chat.id, "⏳ <b>Starting local Bot API server…</b>")
     threading.Thread(
         target=_restart_local_api_with_creds,
-        args=(call.message.chat.id, user_id, api_id, api_hash),
+        args=(call.message.chat.id, user_id, api_id, api_hash,
+              status.message_id if status else None),
         daemon=True,
     ).start()
 
