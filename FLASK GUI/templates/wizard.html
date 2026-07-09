@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}Setup — Relay{% endblock %}
+{% block content %}
+<div class="wizard-shell">
+  <span class="eyebrow">Setup wizard</span>
+  <h1>Connect PikPak to your destination</h1>
+  <p>Five short steps. Nothing here needs command-line experience — just follow along.</p>
+
+  <div class="wizard-steps">
+    <div class="wizard-step-dot current" data-dot="1"></div>
+    <div class="wizard-step-dot" data-dot="2"></div>
+    <div class="wizard-step-dot" data-dot="3"></div>
+    <div class="wizard-step-dot" data-dot="4"></div>
+    <div class="wizard-step-dot" data-dot="5"></div>
+  </div>
+
+  <!-- Step 1: What is rclone -->
+  <div class="panel step-panel active" data-step="1">
+    <h2>What's about to happen</h2>
+    <p><strong>rclone</strong> is the free, open-source engine that actually moves your files between PikPak and your destination. Relay installs it for you, keeps your login details on this machine only, and gives you a dashboard on top of it.</p>
+    <p>We detected your system as:</p>
+    <div class="panel" style="background:var(--bg-elevated); margin:12px 0;">
+      <div class="status-line"><strong>OS:</strong>&nbsp;{{ os_info.os }}</div>
+      <div class="status-line"><strong>Architecture:</strong>&nbsp;{{ os_info.arch }}</div>
+      <div class="status-line"><strong>Install location:</strong>&nbsp;{{ os_info.bin_dir }}</div>
+    </div>
+    <p>Nothing is uploaded anywhere except directly between PikPak and your chosen destination — Relay itself never sees your files.</p>
+  </div>
+
+  <!-- Step 2: Install rclone -->
+  <div class="panel step-panel" data-step="2">
+    <h2>Install rclone</h2>
+    <p>Click below to download and install rclone for {{ os_info.os }}. This only needs to happen once.</p>
+    <button class="btn btn-primary" id="installBtn">Install rclone</button>
+    <div id="installLog" class="console" style="margin-top:16px; height:140px; display:none;"></div>
+    <div class="status-line" id="installStatus"></div>
+  </div>
+
+  <!-- Step 3: PikPak remote -->
+  <div class="panel step-panel" data-step="3">
+    <h2>Connect PikPak</h2>
+    <p>Generate a login block in your terminal, then paste it below.</p>
+    <div class="term-flow">
+      <div class="term-row">
+        <div class="term-num">1</div>
+        <div class="term-body">
+          <p class="term-text">Open a terminal — rclone's already installed from Step 2.</p>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">2</div>
+        <div class="term-body">
+          <p class="term-text">Run this: <span class="code-chip" data-copy="rclone config"><span>rclone config</span><span class="copy-ico">⧉</span></span> then type <span class="code-chip" data-copy="n"><span>n</span><span class="copy-ico">⧉</span></span> for "New remote":</p>
+          
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">3</div>
+        <div class="term-body">
+          <p class="term-text">Name it exactly this (must match, all caps):</p>
+          <div class="code-row"><span class="code-chip" data-copy="PIKKY"><span>PIKKY</span><span class="copy-ico">⧉</span></span></div>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">4</div>
+        <div class="term-body">
+          <p class="term-text">Storage type — rclone jumps to the right number for you:</p>
+          <div class="code-row"><span class="code-chip" data-copy="pikpak"><span>pikpak</span><span class="copy-ico">⧉</span></span></div>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">5</div>
+        <div class="term-body">
+          <p class="term-text">For <strong>user</strong>, enter your PikPak email. For <strong>pass</strong>, type <span class="code-chip" data-copy="y"><span>y</span><span class="copy-ico">⧉</span></span> to obscure it, then enter your PikPak password.</p>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">6</div>
+        <div class="term-body">
+          <p class="term-text">Press Enter through any other prompts. At the end, confirm with <span class="code-chip" data-copy="y"><span>y</span><span class="copy-ico">⧉</span></span> then quit with <span class="code-chip" data-copy="q"><span>q</span><span class="copy-ico">⧉</span></span>.</p>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">7</div>
+        <div class="term-body">
+          <p class="term-text">Open <code>rclone.conf</code>:</p>
+          <div class="code-row">
+            <span class="code-chip" data-copy="notepad %APPDATA%\rclone\rclone.conf"><span>Windows (CMD): notepad %APPDATA%\rclone\rclone.conf</span><span class="copy-ico">⧉</span></span>
+            <span class="code-chip" data-copy="notepad $env:APPDATA\rclone\rclone.conf"><span>Windows (PowerShell): notepad $env:APPDATA\rclone\rclone.conf</span><span class="copy-ico">⧉</span></span>
+            <span class="code-chip" data-copy="~/.config/rclone/rclone.conf"><span>macOS/Linux: ~/.config/rclone/rclone.conf</span><span class="copy-ico">⧉</span></span>
+          </div>
+          <p class="term-text" style="margin-top:6px; color:var(--text-faint); font-size:12.5px;">Note: <code>%APPDATA%</code> only expands in CMD. In PowerShell use <code>$env:APPDATA</code> instead, or the path will fail to resolve.</p>
+        </div>
+      </div>
+      <div class="term-row">
+        <div class="term-num">8</div>
+        <div class="term-body">
+          <p class="term-text">Copy the whole <code>[PIKKY]</code> block (that line down to the next blank line) and paste it below.</p>
+        </div>
+      </div>
+    </div>
+    <label for="pikpakConfig">Paste your [PIKKY] config block</label>
+    <textarea id="pikpakConfig" placeholder="[PIKKY]&#10;type = pikpak&#10;user = &#10;pass = &#10;device_id = &#10;captcha_token = {}&#10;token = "></textarea>
+    <div class="status-line" id="pikpakStatus"></div>
+    <p class="doc-links">
+      <a href="https://rclone.org/pikpak/" target="_blank" rel="noopener">rclone PikPak docs ↗</a>
+    </p>
+  </div>
+
+  <!-- Step 4: Destination -->
+  <div class="panel step-panel" data-step="4">
+    <h2>Choose your destination</h2>
+    <div class="option-card selected" data-dest="gdrive">
+      <input type="radio" name="dest" value="gdrive" checked>
+      <div class="option-card-body">
+        <h3>Google Drive</h3>
+        <p>Best for most people. Uses your existing Google account storage.</p>
+      </div>
+    </div>
+    <div class="option-card" data-dest="webdav">
+      <input type="radio" name="dest" value="webdav">
+      <div class="option-card-body">
+        <h3>WebDAV</h3>
+        <p>Free, works with Nextcloud, Koofr, and other WebDAV-compatible storage.</p>
+      </div>
+    </div>
+
+    <div id="gdriveFields">
+      <div class="term-flow">
+        <div class="term-row">
+          <div class="term-num">1</div>
+          <div class="term-body">
+            <p class="term-text">Open a terminal — rclone's already installed from Step 2.</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">2</div>
+          <div class="term-body">
+            <p class="term-text">Run this: <span class="code-chip" data-copy="rclone config"><span>rclone config</span><span class="copy-ico">⧉</span></span> then type <span class="code-chip" data-copy="n"><span>n</span><span class="copy-ico">⧉</span></span> for "New remote":</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">3</div>
+          <div class="term-body">
+            <p class="term-text">Name it exactly this (must match, all caps):</p>
+            <div class="code-row"><span class="code-chip" data-copy="GDRIVE"><span>GDRIVE</span><span class="copy-ico">⧉</span></span></div>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">4</div>
+          <div class="term-body">
+            <p class="term-text">Storage type — rclone jumps to the right number for you:</p>
+            <div class="code-row"><span class="code-chip" data-copy="drive"><span>drive</span><span class="copy-ico">⧉</span></span></div>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">5</div>
+          <div class="term-body">
+            <p class="term-text">Leave <strong>client_id</strong> and <strong>client_secret</strong> blank (press Enter) unless you have your own Google API credentials.</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">6</div>
+          <div class="term-body">
+            <p class="term-text">For <strong>scope</strong>, choose <span class="code-chip" data-copy="1"><span>1</span><span class="copy-ico">⧉</span></span> (full access). Leave root_folder_id and service_account_file blank, then type <span class="code-chip" data-copy="n"><span>n</span><span class="copy-ico">⧉</span></span> for "Edit advanced config".</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">7</div>
+          <div class="term-body">
+            <p class="term-text">Type <span class="code-chip" data-copy="y"><span>y</span><span class="copy-ico">⧉</span></span> to use auto config — this opens your browser to sign in and authorize Google Drive access.</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">8</div>
+          <div class="term-body">
+            <p class="term-text">Type <span class="code-chip" data-copy="n"><span>n</span><span class="copy-ico">⧉</span></span> for "Configure as a Shared Drive". Press Enter through any other prompts. At the end, confirm with <span class="code-chip" data-copy="y"><span>y</span><span class="copy-ico">⧉</span></span> then quit with <span class="code-chip" data-copy="q"><span>q</span><span class="copy-ico">⧉</span></span>.</p>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">9</div>
+          <div class="term-body">
+            <p class="term-text">Open <code>rclone.conf</code>:</p>
+            <div class="code-row">
+              <span class="code-chip" data-copy="notepad %APPDATA%\rclone\rclone.conf"><span>Windows (CMD): notepad %APPDATA%\rclone\rclone.conf</span><span class="copy-ico">⧉</span></span>
+              <span class="code-chip" data-copy="notepad $env:APPDATA\rclone\rclone.conf"><span>Windows (PowerShell): notepad $env:APPDATA\rclone\rclone.conf</span><span class="copy-ico">⧉</span></span>
+              <span class="code-chip" data-copy="~/.config/rclone/rclone.conf"><span>macOS/Linux: ~/.config/rclone/rclone.conf</span><span class="copy-ico">⧉</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="term-row">
+          <div class="term-num">10</div>
+          <div class="term-body">
+            <p class="term-text">Copy the whole <code>[GDRIVE]</code> block (that line down to the next blank line) and paste it below.</p>
+          </div>
+        </div>
+      </div>
+      <label for="gdriveConfig">Paste your [GDRIVE] config block</label>
+      <textarea id="gdriveConfig" placeholder="[GDRIVE]&#10;type = drive&#10;scope = drive&#10;token = "></textarea>
+      <p class="doc-links"><a href="https://rclone.org/drive/" target="_blank" rel="noopener">rclone Google Drive docs ↗</a></p>
+    </div>
+    <div id="webdavFields" style="display:none;">
+      <label for="webdavUrl">WebDAV URL</label>
+      <input type="url" id="webdavUrl" placeholder="https://your-cloud.example.com/remote.php/webdav/">
+      <label for="webdavUser">Username</label>
+      <input type="text" id="webdavUser">
+      <label for="webdavPass">Password</label>
+      <input type="password" id="webdavPass">
+      <p class="doc-links"><a href="https://rclone.org/webdav/" target="_blank" rel="noopener">rclone WebDAV docs ↗</a></p>
+    </div>
+    <div class="status-line" id="destStatus"></div>
+  </div>
+
+  <!-- Step 5: Verify + save -->
+  <div class="panel step-panel" data-step="5">
+    <h2>Verify and save</h2>
+    <label for="profileName">Profile name</label>
+    <input type="text" id="profileName" value="default" placeholder="default">
+    <p class="field-hint">Adding another PikPak account to get around its transfer limits? Each profile is fully separate, so just give it its own name — we've suggested the next one automatically (default → alpha → bravo → charlie → delta…).</p>
+    <button class="btn btn-primary" id="verifyBtn">Test connection</button>
+    <div id="verifyResults" style="margin-top:14px;"></div>
+  </div>
+
+  <div class="wizard-actions">
+    <button class="btn" id="backBtn" style="visibility:hidden;">Back</button>
+    <button class="btn btn-primary" id="nextBtn">Continue</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/wizard.js"></script>
+{% endblock %}

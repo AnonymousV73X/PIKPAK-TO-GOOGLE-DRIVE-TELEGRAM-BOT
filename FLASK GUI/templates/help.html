@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Help — Relay{% endblock %}
+{% block content %}
+<span class="eyebrow">Help &amp; documentation</span>
+<h1>How Relay works</h1>
+
+<div class="help-section panel">
+  <h2>What is rclone?</h2>
+  <p>rclone is a free command-line tool that copies and syncs files between cloud storage providers. Relay installs it for you and drives it from this dashboard, so you never touch a terminal. Your credentials stay in a local config file on this machine — they're never sent to any Relay server, because there isn't one.</p>
+</div>
+
+<div class="help-section panel">
+  <h2>Setting up PikPak</h2>
+  <ol>
+    <li>Run <code>rclone config</code> on any machine (or use an existing config file).</li>
+    <li>Create a new remote named exactly <code>PIKKY</code>, type <strong>PikPak</strong>.</li>
+    <li>Sign in with your PikPak account email and password.</li>
+    <li>Copy the resulting <code>[PIKKY]</code> block into the setup wizard.</li>
+  </ol>
+  <p class="doc-links"><a href="https://rclone.org/pikpak/" target="_blank" rel="noopener">Official rclone PikPak docs ↗</a></p>
+</div>
+
+<div class="help-section panel">
+  <h2>Setting up Google Drive</h2>
+  <ol>
+    <li>Create a remote named <code>GDRIVE</code>, type <strong>Google Drive</strong>.</li>
+    <li>Follow the OAuth prompt in your browser to authorize access.</li>
+    <li>Copy the resulting <code>[GDRIVE]</code> block into the setup wizard.</li>
+  </ol>
+  <p class="doc-links"><a href="https://rclone.org/drive/" target="_blank" rel="noopener">Official rclone Google Drive docs ↗</a></p>
+</div>
+
+<div class="help-section panel">
+  <h2>Setting up WebDAV (free alternative)</h2>
+  <p>WebDAV works with many free or self-hosted storage providers (Nextcloud, Koofr, and others). Just enter your server URL, username, and password in the wizard — no OAuth needed.</p>
+  <p class="doc-links"><a href="https://rclone.org/webdav/" target="_blank" rel="noopener">Official rclone WebDAV docs ↗</a></p>
+</div>
+
+<div class="help-section panel">
+  <h2>Transfer settings used</h2>
+  <p>Every transfer runs as an <code>rclone sync</code> filtered to video files (mp4, mkv, avi, mov, wmv, flv, webm, mpg, mpeg, m4v, 3gp), with tuning flags: <code>--transfers 4 --checkers 8 --fast-list --checksum --drive-chunk-size 64M --buffer-size 32M</code>. Each run lands in a new timestamped folder so nothing overwrites a previous transfer.</p>
+</div>
+
+<div class="help-section panel">
+  <h2>Troubleshooting</h2>
+  <ul>
+    <li><strong>Install fails:</strong> usually a network or firewall block — check your internet connection and try again.</li>
+    <li><strong>Remote verification fails:</strong> double check the remote is named exactly <code>PIKKY</code> / <code>GDRIVE</code> / <code>WEBDAV</code>, and that the pasted config block is complete.</li>
+    <li><strong>Transfer stalls:</strong> large libraries take time — watch the live log for progress, it updates every few seconds.</li>
+    <li><strong>Wrong destination shown:</strong> switch it from the dropdown on the dashboard before starting a transfer.</li>
+  </ul>
+</div>
+{% endblock %}

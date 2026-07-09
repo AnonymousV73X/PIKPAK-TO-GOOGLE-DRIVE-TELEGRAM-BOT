@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Database and Sessions
+*.db
+*.sqlite
+*.session
+*.session-journal
+
+# Environments and Secrets
+.env
+.env.*

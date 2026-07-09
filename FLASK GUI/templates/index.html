@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Relay{% endblock %}
+{% block content %}
+
+<div class="profile-switcher">
+  <span class="eyebrow" style="margin:0;">Active profile</span>
+  <select id="profileSelect" class="styled-select">
+    {% for p in profiles %}
+    <option value="{{ p.name }}" {{ 'selected' if p.name == profile.name else '' }}>{{ p.name }}</option>
+    {% endfor %}
+  </select>
+  <a href="/wizard" class="btn">+ Add profile</a>
+</div>
+
+{% if profiles|length <= 1 %}
+<div class="panel" style="margin-bottom:20px; border-color: var(--accent);">
+  <span class="eyebrow">Hitting PikPak's transfer limit?</span>
+  <p style="margin-top:0;">PikPak caps how much a single account can pull down / transfer out. The workaround is simple: connect a second (or third) PikPak account as its own profile here, then just switch between them from the dropdown above — each profile keeps its own PikPak login completely separate.</p>
+  <p>New profiles are auto-named "default", then <code>alpha</code>, <code>bravo</code>, <code>charlie</code>, <code>delta</code>, <code>echo</code>, <code>foxtrot</code>… (NATO alphabet) so it's easy to tell them apart at a glance.</p>
+  <a href="/wizard" class="btn btn-primary">+ Add another PikPak account</a>
+</div>
+{% endif %}
+
+<div class="panel" style="margin-bottom:20px;">
+  <span class="eyebrow">Transfer relay</span>
+  <div class="orbit-wrap">
+    <div class="orbit-node source">
+      <div class="orbit-node-circle">PIKPAK</div>
+      <div class="orbit-node-label">Source</div>
+    </div>
+    <div class="orbit-track" id="orbitTrack">
+      <div class="orbit-particle" id="orbitParticle"></div>
+    </div>
+    <div class="orbit-node dest">
+      <div class="orbit-node-circle" id="destLabel">{{ 'DRIVE' if profile.default_destination == 'gdrive' else 'WEBDAV' }}</div>
+      <div class="orbit-node-label">Destination</div>
+    </div>
+  </div>
+  <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+    <span class="badge badge-idle" id="statusBadge"><span class="badge-dot"></span><span id="statusText">Idle</span></span>
+    <div style="display:flex; gap:10px;">
+      <select id="destinationSelect" class="styled-select" style="width:auto; margin:0;">
+        <option value="gdrive" {{ 'selected' if profile.default_destination == 'gdrive' else '' }}>Google Drive</option>
+        <option value="webdav" {{ 'selected' if profile.default_destination == 'webdav' else '' }}>WebDAV</option>
+      </select>
+      <button class="btn btn-primary" id="startBtn">Start transfer</button>
+      <button class="btn btn-danger" id="stopBtn" style="display:none;">Stop</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid grid-3" style="margin-bottom:20px;">
+  <div class="panel stat-card">
+    <span class="stat-label">Upload speed</span>
+    <span class="stat-value accent" id="uploadSpeed">—</span>
+  </div>
+  <div class="panel stat-card">
+    <span class="stat-label">Download speed</span>
+    <span class="stat-value accent" id="downloadSpeed">—</span>
+  </div>
+  <div class="panel stat-card">
+    <span class="stat-label">Elapsed</span>
+    <span class="stat-value" id="elapsed">00:00:00</span>
+  </div>
+</div>
+
+<div class="grid grid-2" style="margin-bottom:20px;">
+  <div class="panel">
+    <span class="eyebrow">PikPak storage</span>
+    <div id="pikpakStats"><p>Loading…</p></div>
+  </div>
+  <div class="panel">
+    <span class="eyebrow">Drive storage</span>
+    <div id="driveStats"><p>Loading…</p></div>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:20px;">
+  <span class="eyebrow">Storage tools</span>
+
+  <div class="storage-tools-row">
+    <div class="storage-tools-label">
+      <strong>Clear PikPak files</strong>
+      <span>Deletes everything in this profile's PikPak account. Use once you've confirmed the transfer landed on your drive.</span>
+    </div>
+    <div class="storage-tools-actions">
+      <button class="btn btn-danger" id="clearPikpakBtn">Clear PikPak</button>
+    </div>
+  </div>
+
+  <div class="storage-tools-row">
+    <div class="storage-tools-label">
+      <strong>Clear a drive folder</strong>
+      <span>Pick a top-level folder on the destination and delete it — handy for clearing out a finished transfer.</span>
+    </div>
+    <div class="storage-tools-actions">
+      <select id="driveClearSelect" class="styled-select" style="min-width:220px;">
+        <option value="">Loading folders…</option>
+      </select>
+      <button class="btn btn-danger" id="clearDriveBtn" disabled>Delete folder</button>
+    </div>
+  </div>
+  <div class="storage-tools-status" id="storageToolsStatus"></div>
+</div>
+
+<div class="panel" style="margin-bottom:20px;">
+  <span class="eyebrow">Live log</span>
+  <div class="console" id="console"><div class="console-empty">No activity yet. Start a transfer to see live output.</div></div>
+</div>
+
+<div class="panel">
+  <span class="eyebrow">Transfer history</span>
+  <table class="table" id="historyTable">
+    <thead>
+      <tr><th>Status</th><th>Destination</th><th>Files</th><th>Started</th><th>Ended</th></tr>
+    </thead>
+    <tbody><tr><td colspan="5" class="empty-state">Loading history…</td></tr></tbody>
+  </table>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const statusBadge = document.getElementById('statusBadge');
+const statusText = document.getElementById('statusText');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const particle = document.getElementById('orbitParticle');
+const track = document.getElementById('orbitTrack');
+const consoleEl = document.getElementById('console');
+const destSelect = document.getElementById('destinationSelect');
+const destLabel = document.getElementById('destLabel');
+
+destSelect.addEventListener('change', () => {
+  destLabel.textContent = destSelect.value === 'gdrive' ? 'DRIVE' : 'WEBDAV';
+});
+
+document.getElementById('profileSelect').addEventListener('change', async (e) => {
+  await fetch('/api/profile/switch', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name: e.target.value })
+  });
+  location.reload();
+});
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  await fetch('/api/transfer/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ destination: destSelect.value })
+  });
+  poll();
+});
+
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+  await fetch('/api/transfer/stop', { method: 'POST' });
+});
+
+function setBadge(status) {
+  const map = {
+    idle: ['badge-idle', 'Idle'],
+    running: ['badge-running', 'Transferring'],
+    completed: ['badge-completed', 'Completed'],
+    failed: ['badge-failed', 'Failed'],
+    cancelled: ['badge-cancelled', 'Cancelled'],
+  };
+  const [cls, label] = map[status] || map.idle;
+  statusBadge.className = 'badge ' + cls;
+  statusText.textContent = label;
+
+  const running = status === 'running';
+  particle.classList.toggle('running', running);
+  track.classList.toggle('active', running);
+  startBtn.style.display = running ? 'none' : 'inline-flex';
+  stopBtn.style.display = running ? 'inline-flex' : 'none';
+  startBtn.disabled = running;
+  stopBtn.disabled = !running;
+}
+
+function fmtElapsed(sec) {
+  sec = sec || 0;
+  const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+  const s = String(Math.floor(sec % 60)).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/transfer/status');
+    const data = await res.json();
+    setBadge(data.status);
+
+    if (data.network) {
+      document.getElementById('uploadSpeed').textContent = data.network.upload_speed;
+      document.getElementById('downloadSpeed').textContent = data.network.download_speed;
+      document.getElementById('elapsed').textContent = fmtElapsed(data.network.elapsed_seconds);
+    }
+
+    if (data.logs && data.logs.length) {
+      consoleEl.innerHTML = data.logs.map(l =>
+        `<div class="log-line log-${l.level}">[${l.level.toUpperCase()}] ${escapeHtml(l.message)}</div>`
+      ).join('');
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+  } catch (e) { /* keep polling */ }
+}
+
+async function loadStats() {
+  try {
+    const [pik, drive] = await Promise.all([
+      fetch('/api/stats/pikpak').then(r => r.json()),
+      fetch('/api/stats/drive').then(r => r.json()),
+    ]);
+    const pikEl = document.getElementById('pikpakStats');
+    if (pik.about && !pik.about.error) {
+      pikEl.innerHTML = `
+        <div class="stat-value" style="font-size:18px;">${pik.about.used || '—'} <span style="color:var(--text-faint); font-size:13px;">of ${pik.about.total || '—'}</span></div>
+        <p style="margin-top:8px;">${pik.videos.video_count || 0} video files found</p>`;
+    } else {
+      pikEl.innerHTML = `<p>Could not read PikPak stats. ${escapeHtml((pik.about && pik.about.error) || '')}</p>`;
+    }
+
+    const driveEl = document.getElementById('driveStats');
+    if (drive.about && !drive.about.error) {
+      driveEl.innerHTML = `
+        <div class="stat-value" style="font-size:18px;">${drive.about.used || '—'} <span style="color:var(--text-faint); font-size:13px;">of ${drive.about.total || '—'}</span></div>
+        <p style="margin-top:8px;">Free: ${drive.about.free || '—'} · ${escapeHtml(drive.remote)}</p>`;
+    } else {
+      driveEl.innerHTML = `<p>Could not read drive stats. ${escapeHtml((drive.about && drive.about.error) || '')}</p>`;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    const data = await res.json();
+    const tbody = document.querySelector('#historyTable tbody');
+    if (!data.transfers.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No transfers yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.transfers.map(t => `
+      <tr>
+        <td><span class="badge badge-${t.status}">${t.status}</span></td>
+        <td>${escapeHtml(t.destination_folder || '—')}</td>
+        <td>${t.files_count || 0}</td>
+        <td>${(t.start_time || '').replace('T', ' ').slice(0, 19)}</td>
+        <td>${(t.end_time || '').replace('T', ' ').slice(0, 19) || '—'}</td>
+      </tr>
+    `).join('');
+  } catch (e) { /* ignore */ }
+}
+
+// ---- Storage tools: clear PikPak / clear a drive folder ----
+const clearPikpakBtn = document.getElementById('clearPikpakBtn');
+const clearDriveBtn = document.getElementById('clearDriveBtn');
+const driveClearSelect = document.getElementById('driveClearSelect');
+const storageToolsStatus = document.getElementById('storageToolsStatus');
+
+function showStorageStatus(msg, ok) {
+  storageToolsStatus.textContent = msg;
+  storageToolsStatus.className = 'storage-tools-status ' + (ok === true ? 'status-ok' : ok === false ? 'status-fail' : '');
+}
+
+async function loadDriveFolders() {
+  driveClearSelect.innerHTML = '<option value="">Loading folders…</option>';
+  clearDriveBtn.disabled = true;
+  try {
+    const res = await fetch('/api/stats/drive/list?path=');
+    const data = await res.json();
+    const folders = (data.items || []).filter(i => i.IsDir);
+    if (data.error) {
+      driveClearSelect.innerHTML = '<option value="">Could not list folders</option>';
+      return;
+    }
+    if (!folders.length) {
+      driveClearSelect.innerHTML = '<option value="">No folders found</option>';
+      return;
+    }
+    driveClearSelect.innerHTML = folders.map(f =>
+      `<option value="${f.Path.replace(/"/g, '&quot;')}">${escapeHtml(f.Name)}</option>`
+    ).join('');
+    clearDriveBtn.disabled = false;
+  } catch (e) {
+    driveClearSelect.innerHTML = '<option value="">Could not list folders</option>';
+  }
+}
+
+clearPikpakBtn.addEventListener('click', async () => {
+  if (!confirm('Delete everything in this profile\'s PikPak account? This cannot be undone.')) return;
+  clearPikpakBtn.disabled = true;
+  showStorageStatus('Clearing PikPak…');
+  try {
+    const res = await fetch('/api/pikpak/clear', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showStorageStatus('✓ PikPak cleared.', true);
+      loadStats();
+    } else {
+      showStorageStatus('✗ ' + (data.error || 'Failed to clear PikPak.'), false);
+    }
+  } catch (e) {
+    showStorageStatus('✗ Could not reach the server.', false);
+  } finally {
+    clearPikpakBtn.disabled = false;
+  }
+});
+
+clearDriveBtn.addEventListener('click', async () => {
+  const path = driveClearSelect.value;
+  if (!path) return;
+  if (!confirm(`Delete the folder "${path}" and everything inside it from the drive? This cannot be undone.`)) return;
+  clearDriveBtn.disabled = true;
+  showStorageStatus(`Clearing "${path}"…`);
+  try {
+    const res = await fetch('/api/drive/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showStorageStatus(`✓ "${path}" cleared.`, true);
+      loadStats();
+      loadDriveFolders();
+    } else {
+      showStorageStatus('✗ ' + (data.error || 'Failed to clear folder.'), false);
+      clearDriveBtn.disabled = false;
+    }
+  } catch (e) {
+    showStorageStatus('✗ Could not reach the server.', false);
+    clearDriveBtn.disabled = false;
+  }
+});
+
+loadDriveFolders();
+
+poll();
+loadStats();
+loadHistory();
+setInterval(poll, 2000);
+setInterval(loadHistory, 15000);
+</script>
+{% endblock %}
