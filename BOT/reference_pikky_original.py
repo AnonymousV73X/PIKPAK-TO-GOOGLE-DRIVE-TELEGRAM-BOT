@@ -22,6 +22,31 @@ import sqlite3
 from contextlib import contextmanager
 import html
 
+# ── Security: load secrets from environment ──────────────────────────────────
+# Copy .env.example to .env and fill in your values, OR set the env vars
+# directly before running. Never hardcode tokens in source code.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is optional; env vars can be set another way
+
+# Comma-separated list of Telegram user IDs allowed to use the bot.
+# Example: ALLOWED_USERS=123456789,987654321
+# Leave empty to allow ALL users (not recommended for public bots).
+_raw_allowed = os.getenv("ALLOWED_USERS", "")
+ALLOWED_USERS: set[int] = (
+    {int(uid.strip()) for uid in _raw_allowed.split(",") if uid.strip()}
+    if _raw_allowed.strip() else set()
+)
+
+
+def is_allowed(message) -> bool:
+    """Return True if the sender is whitelisted (or whitelist is empty)."""
+    if not ALLOWED_USERS:
+        return True
+    return message.from_user.id in ALLOWED_USERS
+
 # Install required packages if not already installed
 def install_package(package):
     try:
@@ -45,8 +70,13 @@ from telebot.types import (
     CallbackQuery,
 )
 
-# Initialize the Telegram bot
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+# Initialize the Telegram bot — token must come from the BOT_TOKEN env var
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN environment variable is not set. "
+        "Add it to your .env file or export it before running."
+    )
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Database setup
@@ -203,17 +233,22 @@ class TransferManager:
                 "No rclone configuration found. Please set it using /config command."
             )
 
-    def run_command(self, command, capture_output=True, shell=True):
+    def run_command(self, command, capture_output=True):
+        """Run a command safely. `command` must be a list of strings (shell=False)."""
+        if isinstance(command, str):
+            # Safety guard: split string commands rather than using shell=True
+            import shlex
+            command = shlex.split(command)
         try:
             if capture_output:
                 result = subprocess.run(
-                    command, shell=shell, capture_output=True, text=True
+                    command, shell=False, capture_output=True, text=True
                 )
                 stdout = result.stdout.strip() if result.stdout else ""
                 stderr = result.stderr.strip() if result.stderr else ""
                 return result.returncode == 0, stdout, stderr
             else:
-                result = subprocess.run(command, shell=shell)
+                result = subprocess.run(command, shell=False)
                 return result.returncode == 0, "", ""
         except Exception as e:
             self.log_error(f"Command execution failed: {e}")
@@ -401,14 +436,19 @@ class TransferManager:
             ["+ */"] + [f"+ *.{ext}" for ext in video_extensions] + ["- .*", "- *"]
         )
 
-        command = f"""{rclone_path} --config {config_file} sync {pikpak_remote}: "{gdrive_remote}:{destination_folder}" \
-            {' '.join([f'--filter "{rule}"' for rule in filter_rules])} \
-            --progress --stats 30s --stats-one-line \
-            --transfers 4 --checkers 8 --fast-list --checksum \
-            --drive-chunk-size 64M --buffer-size 32M"""
+        # Build command as a list (shell=False) to prevent shell injection
+        command = [
+            rclone_path, "--config", config_file,
+            "sync", f"{pikpak_remote}:", f"{gdrive_remote}:{destination_folder}",
+            "--progress", "--stats", "30s", "--stats-one-line",
+            "--transfers", "4", "--checkers", "8", "--fast-list", "--checksum",
+            "--drive-chunk-size", "64M", "--buffer-size", "32M",
+        ]
+        for rule in filter_rules:
+            command += ["--filter", rule]
 
         try:
-            process = subprocess.Popen(command, shell=True)
+            process = subprocess.Popen(command, shell=False)
             self.transfer_process = process
 
             while True:
@@ -975,6 +1015,8 @@ def send_long_message(chat_id, text, parse_mode=None, reply_markup=None):
 # Telegram Bot Handlers
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
     username = message.from_user.username or "N/A"
     first_name = message.from_user.first_name or "N/A"
@@ -1004,6 +1046,8 @@ def send_welcome(message: Message):
 
 @bot.message_handler(commands=["config"])
 def handle_config(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
 
     bot.reply_to(
@@ -1057,6 +1101,8 @@ def process_config(message: Message):
 
 @bot.message_handler(commands=["upload"])
 def start_upload(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
 
     # Check if user has config
@@ -1180,6 +1226,8 @@ def format_final_message(manager):
 
 @bot.message_handler(commands=["stop"])
 def stop_transfer(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
 
     if (
@@ -1219,6 +1267,8 @@ def stop_transfer(message: Message):
 
 @bot.message_handler(commands=["status"])
 def show_status(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
 
     if (
@@ -1364,6 +1414,8 @@ def stop_transfer_callback(call: CallbackQuery):
 
 @bot.message_handler(commands=["drive"])
 def drive_command(message: Message):
+    if not is_allowed(message):
+        return
     show_drive_stats(message)
 
 
@@ -1404,8 +1456,8 @@ def show_drive_stats(message: Message):
 
         # Get drive stats
         result = subprocess.run(
-            f"{rclone_path} --config {config_file} about GDRIVE:",
-            shell=True,
+            [rclone_path, "--config", config_file, "about", "GDRIVE:"],
+            shell=False,
             capture_output=True,
             text=True,
         )
@@ -1445,6 +1497,8 @@ def show_drive_stats(message: Message):
 
 @bot.message_handler(commands=["drivvy"])
 def list_drive_contents(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
     config = UserManager.get_user_config(user_id)
 
@@ -1481,8 +1535,8 @@ def list_drive_contents(message: Message):
 
         # Get drive contents
         result = subprocess.run(
-            f"{rclone_path} --config {config_file} lsf GDRIVE: --recursive",
-            shell=True,
+            [rclone_path, "--config", config_file, "lsf", "GDRIVE:", "--recursive"],
+            shell=False,
             capture_output=True,
             text=True,
         )
@@ -1559,6 +1613,8 @@ def set_bot_commands():
         
 @bot.message_handler(commands=["pikky"])
 def pikky_stats(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
     config = UserManager.get_user_config(user_id)
 
@@ -1595,8 +1651,8 @@ def pikky_stats(message: Message):
 
         # Get PikPak stats
         result = subprocess.run(
-            f"{rclone_path} --config {config_file} about PIKKY:",
-            shell=True,
+            [rclone_path, "--config", config_file, "about", "PIKKY:"],
+            shell=False,
             capture_output=True,
             text=True,
         )
@@ -1642,8 +1698,8 @@ def pikky_stats(message: Message):
 
         # Get all files first
         result = subprocess.run(
-            f"{rclone_path} --config {config_file} lsf PIKKY: --recursive",
-            shell=True,
+            [rclone_path, "--config", config_file, "lsf", "PIKKY:", "--recursive"],
+            shell=False,
             capture_output=True,
             text=True,
         )
@@ -1670,11 +1726,13 @@ def pikky_stats(message: Message):
                     + [f"+ *.{ext}" for ext in video_extensions]
                     + ["- .*", "- *"]
                 )
-                filter_args = " ".join([f'--filter "{rule}"' for rule in filter_rules])
+                size_cmd = [rclone_path, "--config", config_file, "size", "PIKKY:"]
+                for rule in filter_rules:
+                    size_cmd += ["--filter", rule]
 
                 size_result = subprocess.run(
-                    f"{rclone_path} --config {config_file} size PIKKY: {filter_args}",
-                    shell=True,
+                    size_cmd,
+                    shell=False,
                     capture_output=True,
                     text=True,
                 )
@@ -1712,6 +1770,8 @@ def pikky_stats(message: Message):
 
 @bot.message_handler(commands=["history"])
 def show_history(message: Message):
+    if not is_allowed(message):
+        return
     user_id = message.from_user.id
     transfers = UserManager.get_user_transfers(user_id)
 
