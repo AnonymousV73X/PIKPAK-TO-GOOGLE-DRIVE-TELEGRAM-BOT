@@ -1,5 +1,7 @@
 # PikPak → Google Drive Telegram Bot (with Web GUI)
 
+![Relay Dashboard](FLASK%20GUI/screenshots/dashboard.png)
+
 > **Relay** — a self-hosted control panel that moves video files from your
 > PikPak account to Google Drive (or any WebDAV-compatible cloud) using
 > `rclone` under the hood. Originally a Telegram bot, now also ships with a
