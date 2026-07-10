@@ -10,7 +10,11 @@
     <label for="fsName">Profile Name</label>
     <input type="text" id="fsName" value="default" placeholder="e.g. default, account2">
     
-    <label for="fsConfig" style="margin-top:16px;">Full rclone config text</label>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; margin-bottom:6px;">
+      <label for="fsConfig" style="margin:0;">Full rclone config text</label>
+      <button type="button" class="btn" style="padding:4px 10px; font-size:12px;" onclick="document.getElementById('fsFile').click()">Upload rclone.conf</button>
+      <input type="file" id="fsFile" accept=".conf,.txt" style="display:none;">
+    </div>
     <textarea id="fsConfig" placeholder="[PIKKY]&#10;type = pikpak&#10;...&#10;&#10;[GDRIVE]&#10;type = drive&#10;..." style="height: 300px; font-family: var(--font-mono); font-size: 13px;"></textarea>
 
     <label for="fsDest" style="margin-top:16px;">Default Destination</label>
@@ -49,6 +53,20 @@ document.addEventListener("DOMContentLoaded", () => {
   dest.addEventListener("change", () => {
     local.style.display = dest.value === "local" ? "block" : "none";
   });
+
+  const fsFile = document.getElementById("fsFile");
+  if (fsFile) {
+    fsFile.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        document.getElementById("fsConfig").value = ev.target.result;
+      };
+      reader.readAsText(file);
+      fsFile.value = ""; // Reset
+    });
+  }
 
   const locBtn = document.getElementById("fsLocalBtn");
   if (locBtn) {
