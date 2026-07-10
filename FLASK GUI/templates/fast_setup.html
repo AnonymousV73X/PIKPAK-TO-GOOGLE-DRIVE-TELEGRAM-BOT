@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Fast Setup — Relay{% endblock %}
+{% block content %}
+<div class="wizard-shell">
+  <span class="eyebrow">1-Click Setup</span>
+  <h1>Fast Config Import</h1>
+  <p>Already have an <code>rclone.conf</code> with your PIKKY and GDRIVE (or other) remotes? Paste the entire file here to instantly create a profile.</p>
+
+  <div class="panel" style="margin-top:20px;">
+    <label for="fsName">Profile Name</label>
+    <input type="text" id="fsName" value="default" placeholder="e.g. default, account2">
+    
+    <label for="fsConfig" style="margin-top:16px;">Full rclone config text</label>
+    <textarea id="fsConfig" placeholder="[PIKKY]&#10;type = pikpak&#10;...&#10;&#10;[GDRIVE]&#10;type = drive&#10;..." style="height: 300px; font-family: var(--font-mono); font-size: 13px;"></textarea>
+
+    <label for="fsDest" style="margin-top:16px;">Default Destination</label>
+    <select id="fsDest" class="styled-select" style="max-width: 300px;">
+      <option value="gdrive">Google Drive</option>
+      <option value="webdav">WebDAV</option>
+      <option value="local">Local Folder</option>
+    </select>
+
+    <div id="fsLocal" style="display:none; margin-top:16px;">
+      <label>Local destination folder</label>
+      <div class="local-path-row">
+        <span class="local-path-display" id="fsLocalDisplay">No folder chosen yet</span>
+        <button type="button" class="btn" id="fsLocalBtn">Choose folder…</button>
+      </div>
+      <input type="hidden" id="fsLocalVal">
+    </div>
+
+    <div class="status-line" id="fsStatus" style="margin-top:16px;"></div>
+
+    <div style="display:flex; justify-content:space-between; margin-top:24px; padding-top:20px; border-top:1px solid var(--panel-border);">
+      <a href="/wizard" class="btn">Use step-by-step wizard instead</a>
+      <button class="btn btn-primary" id="fsSaveBtn">Save & Connect</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const dest = document.getElementById("fsDest");
+  const local = document.getElementById("fsLocal");
+  const btn = document.getElementById("fsSaveBtn");
+  
+  dest.addEventListener("change", () => {
+    local.style.display = dest.value === "local" ? "block" : "none";
+  });
+
+  const locBtn = document.getElementById("fsLocalBtn");
+  if (locBtn) {
+    locBtn.addEventListener("click", async () => {
+      const result = await window.openFileBrowser({ mode: "pickdir", title: "Choose local destination" });
+      if (result && result.path) {
+        document.getElementById("fsLocalVal").value = result.path;
+        document.getElementById("fsLocalDisplay").textContent = result.path;
+      }
+    });
+  }
+
+  btn.addEventListener("click", async () => {
+    const config = document.getElementById("fsConfig").value.trim();
+    if (!config) {
+      document.getElementById("fsStatus").innerHTML = '<span style="color:var(--danger)">Please paste your config text.</span>';
+      return;
+    }
+    
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+    document.getElementById("fsStatus").textContent = "";
+
+    try {
+      const res = await fetch("/api/profile/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: document.getElementById("fsName").value.trim() || "default",
+          rclone_config: config,
+          default_destination: dest.value,
+          local_destination_path: document.getElementById("fsLocalVal").value
+        })
+      });
+      if (!res.ok) throw new Error("Failed to save profile");
+      window.location.href = "/";
+    } catch (err) {
+      document.getElementById("fsStatus").innerHTML = `<span style="color:var(--danger)">Error: ${err.message}</span>`;
+      btn.disabled = false;
+      btn.textContent = "Save & Connect";
+    }
+  });
+});
+</script>
+{% endblock %}
