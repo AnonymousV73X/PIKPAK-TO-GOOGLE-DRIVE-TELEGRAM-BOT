@@ -8,7 +8,15 @@
 
   <div class="panel" style="margin-top:20px;">
     <label for="fsName">Profile Name</label>
-    <input type="text" id="fsName" value="default" placeholder="e.g. default, account2">
+    <input type="text" id="fsName" placeholder="e.g. alpha, bravo…">
+    <script>
+      (function() {
+        var nato = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel','india','juliet','kilo','lima','mike'];
+        var existing = {{ profiles | map(attribute='name') | list | tojson }};
+        var next = nato.find(function(n) { return !existing.includes(n); }) || ('profile-' + Date.now());
+        document.getElementById('fsName').value = next;
+      })();
+    </script>
     
     <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; margin-bottom:6px;">
       <label for="fsConfig" style="margin:0;">Full rclone config text</label>

@@ -24,12 +24,14 @@ def index():
 @app.route("/wizard")
 def wizard():
     theme = core.Preferences.get("theme", "dark")
-    return render_template("wizard.html", os_info=core.os_report(), theme=theme)
+    profiles = core.ProfileManager.list_profiles()
+    return render_template("wizard.html", os_info=core.os_report(), theme=theme, profiles=profiles)
 
 @app.route("/fast-setup")
 def fast_setup():
     theme = core.Preferences.get("theme", "dark")
-    return render_template("fast_setup.html", os_info=core.os_report(), theme=theme)
+    profiles = core.ProfileManager.list_profiles()
+    return render_template("fast_setup.html", os_info=core.os_report(), theme=theme, profiles=profiles)
 
 
 @app.route("/help")
