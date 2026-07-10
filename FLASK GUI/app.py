@@ -29,7 +29,7 @@ def wizard():
 @app.route("/fast-setup")
 def fast_setup():
     theme = core.Preferences.get("theme", "dark")
-    return render_template("fast_setup.html", theme=theme)
+    return render_template("fast_setup.html", os_info=core.os_report(), theme=theme)
 
 
 @app.route("/help")
