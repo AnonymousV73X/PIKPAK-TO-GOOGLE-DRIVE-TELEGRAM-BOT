@@ -620,11 +620,17 @@ class RcloneQuery:
                 return {"items": items}
             except Exception as e:
                 return {"error": str(e)}
+        # Build the rclone target.  For root: "PIKKY:" — for a sub-path: "PIKKY:My Pack"
+        # DO NOT add a trailing slash; the PikPak backend resolves the ID from the
+        # name and a trailing slash confuses it into thinking the dir doesn't exist.
+        clean_path = path.strip("/")
+        target = f"{remote}:{clean_path}" if clean_path else f"{remote}:"
         ok, out, err = self._run([
             "lsjson",
-            f"{remote}:{path.strip('/') + '/' if path.strip('/') else ''}",
+            target,
             "--no-modtime",
             "--no-mimetype",
+            "--fast-list",
         ])
         if not ok:
             return {"error": err}
