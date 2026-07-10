@@ -236,8 +236,16 @@
   <div class="panel step-panel" data-step="5">
     <h2>Verify and save</h2>
     <label for="profileName">Profile name</label>
-    <input type="text" id="profileName" value="default" placeholder="default">
-    <p class="field-hint">Adding another PikPak account to get around its transfer limits? Each profile is fully separate, so just give it its own name — we've suggested the next one automatically (default → alpha → bravo → charlie → delta…).</p>
+    <input type="text" id="profileName" placeholder="e.g. alpha, bravo…">
+    <p class="field-hint">Each profile is a fully separate PikPak account. We've pre-filled the next NATO-alphabet name for you.</p>
+    <script>
+      (function() {
+        var nato = ['alpha','bravo','charlie','delta','echo','foxtrot','golf','hotel','india','juliet','kilo','lima','mike'];
+        var existing = {{ profiles | map(attribute='name') | list | tojson }};
+        var next = nato.find(function(n) { return !existing.includes(n); }) || ('profile-' + Date.now());
+        document.getElementById('profileName').value = next;
+      })();
+    </script>
     <button class="btn btn-primary" id="verifyBtn">Test connection</button>
     <div id="verifyResults" style="margin-top:14px;"></div>
   </div>
