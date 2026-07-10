@@ -313,8 +313,9 @@ class RcloneInstaller:
 class TransferJob:
     """Represents one running or completed transfer for a profile."""
 
+    # Fallback regex for non-JSON rclone output (older versions)
     STATS_RE = re.compile(
-        r"Transferred:\s*([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+),\s*(\d+)%,\s*([\d.]+\s*\w+/s),\s*ETA\s*(\S+)"
+        r"Transferred:\s*([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%,\s*([\d.]+\s*\S+/s),\s*ETA\s*(\S+)"
     )
 
     def __init__(self, profile):
@@ -374,7 +375,69 @@ class TransferJob:
             except Exception:
                 pass
 
+    def _handle_log_line(self, line):
+        """Parse a single line of rclone --use-json-log output."""
+        line = line.strip()
+        if not line:
+            return
+        try:
+            obj = json.loads(line)
+        except Exception:
+            # Not JSON — treat as plain log line
+            if line:
+                self.log("info", line)
+            return
+
+        msg = obj.get("msg", "")
+        level = obj.get("level", "info").lower()
+
+        # Stats objects carry a 'stats' key
+        stats = obj.get("stats")
+        if stats:
+            total_bytes = stats.get("totalBytes", 0) or 0
+            transferred_bytes = stats.get("bytes", 0) or 0
+            speed = stats.get("speed", 0) or 0  # bytes/s
+            eta = stats.get("eta")  # seconds or None
+            pct = int(transferred_bytes * 100 / total_bytes) if total_bytes else 0
+
+            def fmt_bytes(b):
+                for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+                    if b < 1024:
+                        return f"{b:.1f} {unit}"
+                    b /= 1024
+                return f"{b:.1f} PiB"
+
+            def fmt_speed(bps):
+                return fmt_bytes(bps) + "/s"
+
+            def fmt_eta(s):
+                if s is None:
+                    return "—"
+                s = int(s)
+                if s < 60:
+                    return f"{s}s"
+                m, s = divmod(s, 60)
+                h, m = divmod(m, 60)
+                return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+            with self.lock:
+                self.stats = {
+                    "transferred": fmt_bytes(transferred_bytes),
+                    "total": fmt_bytes(total_bytes),
+                    "progress_pct": pct,
+                    "speed": fmt_speed(speed),
+                    "eta": fmt_eta(eta),
+                }
+            return
+
+        # Regular log messages — filter out noise
+        if msg and level not in ("debug",):
+            # Map rclone levels to our levels
+            lvl_map = {"warning": "warning", "error": "error", "critical": "error"}
+            self.log(lvl_map.get(level, "info"), msg)
+
     def _handle_stdout_line(self, line):
+        """Legacy fallback — used only when JSON log isn't available."""
         m = self.STATS_RE.search(line)
         if m:
             with self.lock:
@@ -464,24 +527,49 @@ class TransferJob:
             else:
                 dest_arg = f"{dest_remote}:{self.destination_folder}"
 
-            # "copy" (not "sync") so a partial selection or an existing local folder
-            # never has unrelated files deleted out from under it.
-            command = [rclone_path, "--config", config_file, "copy", "PIKKY:", dest_arg,
-                       "--progress", "--stats", "2s", "--stats-one-line",
-                       "--transfers", "8", "--checkers", "16", "--fast-list",
-                       "--drive-chunk-size", "128M", "--buffer-size", "64M",
-                       "--multi-thread-streams", "8", "--multi-thread-cutoff", "50M"]
+            # Use JSON logging for reliable stats parsing.
+            # --stats-one-line uses \r which breaks line iteration; JSON log uses \n.
+            command = [
+                rclone_path, "--config", config_file,
+                "copy", "PIKKY:", dest_arg,
+                "--use-json-log",
+                "--stats", "2s",
+                "--stats-log-level", "INFO",
+                "--transfers", "4",
+                "--checkers", "8",
+                "--fast-list",
+                "--buffer-size", "128M",
+                "--retries", "3",
+                "--low-level-retries", "5",
+            ]
             if not is_local:
-                # WebDAV in particular benefits from bigger direct chunked PUTs
-                # instead of many small round trips.
+                command += ["--drive-chunk-size", "128M"]
+            if self.destination_type == "webdav":
                 command += ["--webdav-nextcloud-chunk-size", "64M"]
             for rule in filter_rules:
                 command += ["--filter", rule]
 
             self.log("info", f"Starting transfer to {'local:' + dest_arg if is_local else dest_arg}")
-            self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,  # rclone writes JSON log to stderr
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+            # Read stderr (JSON log) in a background thread, stdout normally
+            import threading as _th
+
+            def _read_stderr():
+                for raw in self.process.stderr:
+                    self._handle_log_line(raw)
+
+            stderr_thread = _th.Thread(target=_read_stderr, daemon=True)
+            stderr_thread.start()
 
             for raw_line in self.process.stdout:
+                # stdout carries non-JSON progress lines in some rclone versions
                 self._handle_stdout_line(raw_line.strip())
                 if self.stop_requested:
                     self.process.terminate()
@@ -490,6 +578,7 @@ class TransferJob:
                         self.process.kill()
                     break
 
+            stderr_thread.join(timeout=5)
             self.process.wait()
 
             if self.stop_requested:
