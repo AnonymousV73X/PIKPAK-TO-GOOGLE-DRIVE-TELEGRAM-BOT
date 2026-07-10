@@ -80,9 +80,14 @@ def init_db():
             webdav_url TEXT,
             webdav_user TEXT,
             webdav_pass TEXT,
+            local_destination_path TEXT,
             default_destination TEXT DEFAULT 'gdrive',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
+        # Migration for DBs created before local storage support existed.
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(profiles)").fetchall()]
+        if "local_destination_path" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN local_destination_path TEXT")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS transfers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,20 +148,29 @@ class ProfileManager:
         return ProfileManager.get(active_name)
 
     @staticmethod
-    def save(name, rclone_config=None, webdav_url=None, webdav_user=None, webdav_pass=None, default_destination="gdrive"):
+    def save(name, rclone_config=None, webdav_url=None, webdav_user=None, webdav_pass=None,
+             local_destination_path=None, default_destination="gdrive"):
         with get_db() as conn:
             existing = conn.execute("SELECT * FROM profiles WHERE name=?", (name,)).fetchone()
             if existing:
                 conn.execute("""UPDATE profiles SET rclone_config=COALESCE(?, rclone_config),
                     webdav_url=COALESCE(?, webdav_url), webdav_user=COALESCE(?, webdav_user),
-                    webdav_pass=COALESCE(?, webdav_pass), default_destination=? WHERE name=?""",
-                    (rclone_config, webdav_url, webdav_user, webdav_pass, default_destination, name))
+                    webdav_pass=COALESCE(?, webdav_pass), local_destination_path=COALESCE(?, local_destination_path),
+                    default_destination=? WHERE name=?""",
+                    (rclone_config, webdav_url, webdav_user, webdav_pass, local_destination_path, default_destination, name))
             else:
-                conn.execute("""INSERT INTO profiles (name, rclone_config, webdav_url, webdav_user, webdav_pass, default_destination)
-                    VALUES (?, ?, ?, ?, ?, ?)""",
-                    (name, rclone_config, webdav_url, webdav_user, webdav_pass, default_destination))
+                conn.execute("""INSERT INTO profiles (name, rclone_config, webdav_url, webdav_user, webdav_pass,
+                    local_destination_path, default_destination)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (name, rclone_config, webdav_url, webdav_user, webdav_pass, local_destination_path, default_destination))
             conn.commit()
         Preferences.set("active_profile", name)
+
+    @staticmethod
+    def set_local_path(name, path):
+        with get_db() as conn:
+            conn.execute("UPDATE profiles SET local_destination_path=? WHERE name=?", (path, name))
+            conn.commit()
 
     @staticmethod
     def delete(name):
@@ -197,6 +211,33 @@ class ProfileManager:
             rows = conn.execute("""SELECT * FROM transfers WHERE profile_id=?
                 ORDER BY start_time DESC LIMIT ?""", (profile_id, limit)).fetchall()
             return [dict(r) for r in rows]
+
+
+def browse_filesystem(path=None):
+    """List directories under `path` (or home) so the UI can offer a folder picker
+    for the local-storage destination. Only returns directories (files aren't
+    pickable as a destination)."""
+    p = Path(path) if path else Path.home()
+    try:
+        if not p.exists() or not p.is_dir():
+            p = Path.home()
+        p = p.resolve()
+    except Exception:
+        p = Path.home().resolve()
+    items = []
+    try:
+        for entry in sorted(p.iterdir(), key=lambda e: e.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    items.append({"name": entry.name, "path": str(entry)})
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError) as e:
+        return {"path": str(p), "parent": None, "items": [], "error": str(e)}
+    parent = str(p.parent) if str(p.parent) != str(p) else None
+    return {"path": str(p), "parent": parent, "items": items}
 
 
 def generate_alien_name():
@@ -269,109 +310,12 @@ class RcloneInstaller:
             return False, None
 
 
-class NetworkMonitor:
-    def __init__(self):
-        self.monitoring = False
-        self.monitor_thread = None
-        self.previous_stats = {}
-        self.start_time = None
-        self.last_update_time = None
-        self.total_uploaded = 0
-        self.total_downloaded = 0
-        self.current_upload_speed = 0
-        self.current_download_speed = 0
-
-    def get_stats(self):
-        if IS_WINDOWS:
-            return self._get_stats_windows()
-        return self._get_stats_linux()
-
-    def _get_stats_linux(self):
-        try:
-            with open("/proc/net/dev", "r") as f:
-                lines = f.readlines()[2:]
-            stats = {}
-            for line in lines:
-                if ":" not in line:
-                    continue
-                iface, data = line.split(":", 1)
-                vals = data.split()
-                if len(vals) >= 16:
-                    stats[iface.strip()] = {"rx": int(vals[0]), "tx": int(vals[8])}
-            return stats
-        except Exception:
-            return {}
-
-    def _get_stats_windows(self):
-        try:
-            import psutil
-            counters = psutil.net_io_counters(pernic=True)
-            return {name: {"rx": c.bytes_recv, "tx": c.bytes_sent} for name, c in counters.items()}
-        except Exception:
-            return {}
-
-    def _speeds(self, current, elapsed):
-        if not self.previous_stats or elapsed <= 0:
-            return 0, 0
-        rx_diff = tx_diff = 0
-        for iface, vals in current.items():
-            prev = self.previous_stats.get(iface)
-            if prev:
-                d_rx = vals["rx"] - prev["rx"]
-                d_tx = vals["tx"] - prev["tx"]
-                if d_rx > 0:
-                    rx_diff += d_rx
-                if d_tx > 0:
-                    tx_diff += d_tx
-        return rx_diff / elapsed, tx_diff / elapsed
-
-    def _loop(self, interval=1.0):
-        self.start_time = datetime.now()
-        self.previous_stats = self.get_stats()
-        self.last_update_time = self.start_time
-        while self.monitoring:
-            time.sleep(interval)
-            current = self.get_stats()
-            if not current:
-                continue
-            now = datetime.now()
-            elapsed = (now - self.last_update_time).total_seconds()
-            dl, ul = self._speeds(current, elapsed)
-            self.current_download_speed = dl
-            self.current_upload_speed = ul
-            self.total_downloaded += dl * elapsed
-            self.total_uploaded += ul * elapsed
-            self.previous_stats = current
-            self.last_update_time = now
-
-    def start(self):
-        if self.monitoring:
-            return
-        self.monitoring = True
-        self.total_uploaded = 0
-        self.total_downloaded = 0
-        self.monitor_thread = threading.Thread(target=self._loop, daemon=True)
-        self.monitor_thread.start()
-
-    def stop(self):
-        self.monitoring = False
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=2.0)
-
-    def snapshot(self):
-        elapsed = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
-        return {
-            "upload_speed": format_size(self.current_upload_speed) + "/s",
-            "download_speed": format_size(self.current_download_speed) + "/s",
-            "total_uploaded": format_size(self.total_uploaded),
-            "total_downloaded": format_size(self.total_downloaded),
-            "elapsed_seconds": int(elapsed),
-            "active": self.current_upload_speed > 1024 or self.current_download_speed > 1024,
-        }
-
-
 class TransferJob:
     """Represents one running or completed transfer for a profile."""
+
+    STATS_RE = re.compile(
+        r"Transferred:\s*([\d.]+\s*\w+)\s*/\s*([\d.]+\s*\w+),\s*(\d+)%,\s*([\d.]+\s*\w+/s),\s*ETA\s*(\S+)"
+    )
 
     def __init__(self, profile):
         self.profile = profile
@@ -379,12 +323,15 @@ class TransferJob:
         self.logs = []
         self.process = None
         self.stop_requested = False
-        self.network_monitor = NetworkMonitor()
         self.lock = threading.Lock()
         self.destination_folder = None
         self.destination_type = "gdrive"
+        self.selected_paths = []
         self.files_count = 0
         self.thread = None
+        self.start_time = None
+        self.end_time = None
+        self.stats = {"speed": None, "progress_pct": 0, "eta": None, "transferred": None, "total": None}
 
     def log(self, level, message):
         with self.lock:
@@ -397,6 +344,11 @@ class TransferJob:
             f.write(self.profile.get("rclone_config") or "")
         return str(config_file)
 
+    def _local_base_dir(self):
+        base = self.profile.get("local_destination_path") or str(Path.home() / "PikpakTransfers")
+        Path(base).mkdir(parents=True, exist_ok=True)
+        return base
+
     def _run(self, command_list):
         try:
             result = subprocess.run(command_list, capture_output=True, text=True, shell=False)
@@ -404,10 +356,11 @@ class TransferJob:
         except Exception as e:
             return False, "", str(e)
 
-    def start(self, destination_type="gdrive"):
+    def start(self, destination_type="gdrive", selected_paths=None):
         if self.status == "running":
             return False, "Transfer already in progress"
         self.destination_type = destination_type
+        self.selected_paths = [p for p in (selected_paths or []) if p]
         self.stop_requested = False
         self.thread = threading.Thread(target=self._run_transfer, daemon=True)
         self.thread.start()
@@ -421,12 +374,29 @@ class TransferJob:
             except Exception:
                 pass
 
+    def _handle_stdout_line(self, line):
+        m = self.STATS_RE.search(line)
+        if m:
+            with self.lock:
+                self.stats = {
+                    "transferred": m.group(1),
+                    "total": m.group(2),
+                    "progress_pct": int(m.group(3)),
+                    "speed": m.group(4),
+                    "eta": m.group(5),
+                }
+            return
+        if line:
+            self.log("info", line)
+
     def _run_transfer(self):
         self.status = "running"
         self.logs = []
-        start_time = datetime.now()
+        self.start_time = datetime.now()
+        self.end_time = None
+        self.stats = {"speed": None, "progress_pct": 0, "eta": None, "transferred": None, "total": None}
         error_message = None
-        video_files = []
+        matched_files = []
         self.destination_folder = None
 
         try:
@@ -443,49 +413,76 @@ class TransferJob:
             if not ok:
                 raise RuntimeError(f"PIKKY remote failed: {err}")
 
-            dest_remote = "GDRIVE" if self.destination_type == "gdrive" else "WEBDAV"
-            self.log("info", f"Verifying {dest_remote} remote...")
-            ok, _, err = self._run([rclone_path, "--config", config_file, "lsd", f"{dest_remote}:"])
-            if not ok:
-                raise RuntimeError(f"{dest_remote} remote failed: {err}")
+            is_local = self.destination_type == "local"
+            if is_local:
+                local_base = self._local_base_dir()
+                self.log("info", f"Destination: local folder {local_base}")
+            else:
+                dest_remote = "GDRIVE" if self.destination_type == "gdrive" else "WEBDAV"
+                self.log("info", f"Verifying {dest_remote} remote...")
+                ok, _, err = self._run([rclone_path, "--config", config_file, "lsd", f"{dest_remote}:"])
+                if not ok:
+                    raise RuntimeError(f"{dest_remote} remote failed: {err}")
 
-            self.log("info", "Scanning PikPak for video files...")
+            self.log("info", "Scanning PikPak files...")
             ok, out, err = self._run([rclone_path, "--config", config_file, "lsf", "PIKKY:", "--recursive"])
             if not ok:
                 raise RuntimeError(f"Could not list PikPak files: {err}")
 
             all_files = out.split("\n") if out else []
-            video_files = [f for f in all_files if f.split(".")[-1].lower() in VIDEO_EXTENSIONS]
-            self.log("info", f"Found {len(all_files)} files, {len(video_files)} videos.")
-            self.files_count = len(video_files)
 
-            if not video_files:
-                self.log("warning", "No video files found. Nothing to transfer.")
+            if self.selected_paths:
+                selected = [p.strip("/") for p in self.selected_paths]
+                def matches(f):
+                    return any(f == s or f.startswith(s + "/") for s in selected)
+                matched_files = [f for f in all_files if matches(f)]
+                self.log("info", f"{len(matched_files)} file(s) match your selection out of {len(all_files)} total.")
+                filter_rules = []
+                for s in selected:
+                    filter_rules.append(f"+ {s}/**")
+                    filter_rules.append(f"+ {s}")
+                filter_rules.append("- *")
+            else:
+                matched_files = [f for f in all_files if f.split(".")[-1].lower() in VIDEO_EXTENSIONS]
+                self.log("info", f"Found {len(all_files)} files, {len(matched_files)} videos (no manual selection, defaulting to all videos).")
+                filter_rules = ["+ */"] + [f"+ *.{ext}" for ext in VIDEO_EXTENSIONS] + ["- .*", "- *"]
+
+            self.files_count = len(matched_files)
+
+            if not matched_files:
+                self.log("warning", "Nothing matches — nothing to transfer.")
                 self.status = "completed"
+                self.end_time = datetime.now()
                 return
 
             alien_name = generate_alien_name()
             self.destination_folder = f"{alien_name}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
             self.log("info", f"Destination folder: {self.destination_folder}")
 
-            self.network_monitor.start()
+            if is_local:
+                dest_arg = str(Path(local_base) / self.destination_folder)
+            else:
+                dest_arg = f"{dest_remote}:{self.destination_folder}"
 
-            filter_rules = ["+ */"] + [f"+ *.{ext}" for ext in VIDEO_EXTENSIONS] + ["- .*", "- *"]
-            command = [rclone_path, "--config", config_file, "sync", "PIKKY:",
-                       f"{dest_remote}:{self.destination_folder}",
-                       "--progress", "--stats", "5s", "--stats-one-line",
-                       "--transfers", "4", "--checkers", "8", "--fast-list", "--checksum",
-                       "--drive-chunk-size", "64M", "--buffer-size", "32M"]
+            # "copy" (not "sync") so a partial selection or an existing local folder
+            # never has unrelated files deleted out from under it.
+            command = [rclone_path, "--config", config_file, "copy", "PIKKY:", dest_arg,
+                       "--progress", "--stats", "2s", "--stats-one-line",
+                       "--transfers", "8", "--checkers", "16", "--fast-list",
+                       "--drive-chunk-size", "128M", "--buffer-size", "64M",
+                       "--multi-thread-streams", "8", "--multi-thread-cutoff", "50M"]
+            if not is_local:
+                # WebDAV in particular benefits from bigger direct chunked PUTs
+                # instead of many small round trips.
+                command += ["--webdav-nextcloud-chunk-size", "64M"]
             for rule in filter_rules:
                 command += ["--filter", rule]
 
-            self.log("info", f"Starting sync to {dest_remote}:{self.destination_folder}")
+            self.log("info", f"Starting transfer to {'local:' + dest_arg if is_local else dest_arg}")
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
-            for line in self.process.stdout:
-                line = line.strip()
-                if line:
-                    self.log("info", line)
+            for raw_line in self.process.stdout:
+                self._handle_stdout_line(raw_line.strip())
                 if self.stop_requested:
                     self.process.terminate()
                     time.sleep(1)
@@ -494,7 +491,6 @@ class TransferJob:
                     break
 
             self.process.wait()
-            self.network_monitor.stop()
 
             if self.stop_requested:
                 self.status = "cancelled"
@@ -505,44 +501,65 @@ class TransferJob:
                 self.log("success", "Transfer completed successfully!")
             else:
                 self.status = "failed"
-                error_message = "rclone sync returned a non-zero exit code"
+                error_message = "rclone returned a non-zero exit code"
                 self.log("error", "Transfer failed.")
 
         except Exception as e:
             self.status = "failed"
             error_message = str(e)
             self.log("error", str(e))
-            self.network_monitor.stop()
         finally:
             self.process = None
             self.stop_requested = False
+            self.end_time = datetime.now()
             ProfileManager.save_transfer(
                 self.profile["id"], self.status, self.destination_type,
-                start_time, datetime.now(), self.destination_folder,
-                self.files_count, "unknown", error_message,
+                self.start_time, self.end_time, self.destination_folder,
+                self.files_count, self.stats.get("total") or "unknown", error_message,
             )
 
     def snapshot(self):
         with self.lock:
             logs = list(self.logs[-200:])
-        net = self.network_monitor.snapshot() if self.network_monitor.monitoring or self.network_monitor.start_time else None
+            stats = dict(self.stats)
+
+        if self.status == "running" and self.start_time:
+            elapsed = (datetime.now() - self.start_time).total_seconds()
+        elif self.start_time and self.end_time:
+            elapsed = (self.end_time - self.start_time).total_seconds()
+        else:
+            elapsed = 0
+
+        transferred = None
+        if stats.get("total"):
+            transferred = f"{stats.get('transferred') or '0'} / {stats.get('total')}"
+
         return {
             "status": self.status,
             "logs": logs,
-            "network": net,
             "destination_folder": self.destination_folder,
             "files_count": self.files_count,
+            "elapsed_seconds": int(elapsed),
+            "speed": stats.get("speed") if self.status == "running" else None,
+            "progress_pct": stats.get("progress_pct") or 0,
+            "eta": stats.get("eta") if self.status == "running" else None,
+            "transferred": transferred,
         }
 
 
 class RcloneQuery:
-    """Read-only rclone calls used for storage stats + drive listing, run against a saved profile."""
+    """Read-only rclone calls used for storage stats + drive listing, run against a saved profile.
+    Also transparently handles the special "LOCAL" pseudo-remote (the local-storage
+    destination), which is just a folder on disk rather than an rclone remote."""
 
     def __init__(self, profile):
         self.profile = profile
         self.config_file = CONFIG_DIR / f"{profile['name']}.conf"
         with open(self.config_file, "w") as f:
             f.write(profile.get("rclone_config") or "")
+
+    def _local_dir(self):
+        return self.profile.get("local_destination_path") or str(Path.home() / "PikpakTransfers")
 
     def _ensure_rclone(self):
         if not RcloneInstaller.is_installed():
@@ -559,6 +576,12 @@ class RcloneQuery:
             return False, "", str(e)
 
     def about(self, remote):
+        if remote == "LOCAL":
+            try:
+                total, used, free = shutil.disk_usage(self._local_dir())
+                return {"total": format_size(total), "used": format_size(used), "free": format_size(free)}
+            except Exception as e:
+                return {"error": str(e)}
         ok, out, err = self._run(["about", f"{remote}:"])
         if not ok:
             return {"error": err}
@@ -578,7 +601,31 @@ class RcloneQuery:
         return {"total_files": len(files), "video_files": videos, "video_count": len(videos)}
 
     def list_dir(self, remote, path=""):
-        ok, out, err = self._run(["lsjson", f"{remote}:{path}"])
+        if remote == "LOCAL":
+            base = Path(self._local_dir())
+            target = (base / path) if path else base
+            try:
+                target = target.resolve()
+                if base.resolve() not in target.parents and target != base.resolve():
+                    return {"error": "Path escapes the local storage folder."}
+                items = []
+                for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+                    rel = str(entry.relative_to(base)).replace("\\", "/")
+                    size = 0
+                    try:
+                        size = entry.stat().st_size if entry.is_file() else 0
+                    except Exception:
+                        pass
+                    items.append({"Name": entry.name, "Path": rel, "IsDir": entry.is_dir(), "Size": size})
+                return {"items": items}
+            except Exception as e:
+                return {"error": str(e)}
+        ok, out, err = self._run([
+            "lsjson",
+            f"{remote}:{path.strip('/') + '/' if path.strip('/') else ''}",
+            "--no-modtime",
+            "--no-mimetype",
+        ])
         if not ok:
             return {"error": err}
         try:
@@ -589,6 +636,19 @@ class RcloneQuery:
     def clear(self, remote, path=""):
         """Purge (recursively delete) everything at remote:path. Used for the
         'Clear PikPak files' / 'Clear Drive files' quick actions."""
+        if remote == "LOCAL":
+            base = Path(self._local_dir())
+            target = (base / path) if path else base
+            try:
+                target = target.resolve()
+                if target == base.resolve() and not path:
+                    return {"ok": False, "error": "Pick a subfolder — the local storage root can't be cleared from here."}
+                if base.resolve() not in target.parents:
+                    return {"ok": False, "error": "Path escapes the local storage folder."}
+                shutil.rmtree(target)
+                return {"ok": True}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
         target = f"{remote}:{path}" if path else f"{remote}:"
         ok, out, err = self._run(["purge", target])
         if not ok:
