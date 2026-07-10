@@ -587,15 +587,20 @@ class TransferJob:
                 "--use-json-log",
                 "--stats", "2s",
                 "--stats-log-level", "NOTICE",
-                "--transfers", "2",
-                "--checkers", "4",
+                "--transfers", "4",
+                "--checkers", "8",
                 "--size-only",
-                "--buffer-size", "64M",
-                "--retries", "1",
-                "--low-level-retries", "3",
+                "--buffer-size", "128M",
+                "--retries", "3",
+                "--low-level-retries", "5",
             ]
             if not is_local:
-                command += ["--drive-chunk-size", "64M", "--drive-acknowledge-abuse"]
+                command += [
+                    "--drive-chunk-size", "128M", 
+                    "--drive-acknowledge-abuse",
+                    "--drive-pacer-min-sleep", "100ms",
+                    "--drive-pacer-burst", "10"
+                ]
             if self.destination_type == "webdav":
                 command += ["--webdav-nextcloud-chunk-size", "64M"]
             for rule in filter_rules:
