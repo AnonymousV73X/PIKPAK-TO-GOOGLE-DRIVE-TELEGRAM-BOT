@@ -825,3 +825,70 @@ html[data-theme="light"] .console { background: #eef1f4; }
 .selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
 .selection-summary-text { font-size: 13px; color: var(--text-muted); }
 .selection-summary-actions { display: flex; gap: 8px; }
+
+/* ================= Mobile Responsiveness Overrides ================= */
+@media (max-width: 600px) {
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+  .topnav {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .theme-toggle {
+    align-self: flex-end;
+    margin-top: -42px;
+  }
+
+  .table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* Stack the orbit nodes vertically on small screens */
+  .orbit-wrap {
+    flex-direction: column;
+    height: auto;
+    gap: 16px;
+    padding: 16px 0;
+  }
+  .orbit-node {
+    width: 100%;
+  }
+  .orbit-track {
+    position: relative;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    transform: none !important;
+    width: 2px;
+    height: 36px;
+    margin: 4px auto;
+  }
+  .orbit-particle.running {
+    animation: travel-vertical 2.2s linear infinite;
+  }
+
+  /* Full-width buttons on mobile */
+  .btn, .selection-summary-actions, .storage-tools-actions, .local-path-row {
+    width: 100%;
+  }
+  .btn {
+    justify-content: center;
+  }
+  .selection-summary-actions .btn, .storage-tools-actions .btn, .local-path-row .btn, .storage-tools-actions select, .cselect {
+    width: 100% !important;
+  }
+}
+
+@keyframes travel-vertical {
+  0% { top: 0%; left: 50%; }
+  100% { top: 100%; left: 50%; }
+}
