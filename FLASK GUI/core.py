@@ -490,20 +490,14 @@ class TransferJob:
             webdav_port = get_free_port()
             webdav_log = APP_HOME / f"rclone_webdav_{self.profile['name']}.log"
             
-            # Start WebDAV server with VFS cache so PikPak data is buffered locally
-            vfs_cache_dir = APP_HOME / "vfs_cache"
-            vfs_cache_dir.mkdir(parents=True, exist_ok=True)
+            # Start WebDAV server — exact same flags as Telegram bot _start_webdav()
             webdav_cmd = [
                 rclone_path, "--config", config_file,
                 "serve", "webdav", "PIKKY:",
                 "--addr", f"127.0.0.1:{webdav_port}",
                 "--read-only",
                 "--no-modtime",
-                "--vfs-cache-mode", "full",
-                "--vfs-cache-max-size", "2G",
-                "--cache-dir", str(vfs_cache_dir),
-                "--buffer-size", "128M",
-                "--log-level", "ERROR"
+                "--log-level", "ERROR",
             ]
             try:
                 wl = open(webdav_log, "w")
@@ -586,28 +580,30 @@ class TransferJob:
             else:
                 dest_arg = f"{dest_remote}:{self.destination_folder}"
 
-            # Copy from PIKPAKDAV bridge instead of raw PIKKY remote
+            # Copy from PIKPAKDAV bridge — exact same flags as Telegram bot _start_copy_proc()
+            # Only difference: --use-json-log + --stats instead of --log-level INFO (for GUI progress)
             command = [
                 rclone_path, "--config", config_file,
                 "copy", f"{webdav_remote}:", dest_arg,
                 "--use-json-log",
                 "--stats", "2s",
                 "--stats-log-level", "NOTICE",
-                "--transfers", "4",
-                "--checkers", "8",
-                "--ignore-checksum",       # skip expensive verify round trips
-                "--buffer-size", "32M",    # smaller buffer = faster streaming
-                "--retries", "3",
-                "--low-level-retries", "10",
-                "--tpslimit", "10",        # cap API calls/s to avoid pacer sleeping
+                "--transfers", "2",
+                "--checkers", "1",
+                "--size-only",
+                "--drive-chunk-size", "64M",
+                "--drive-acknowledge-abuse",
+                "--drive-pacer-min-sleep", "200ms",
+                "--drive-pacer-burst", "5",
+                "--tpslimit", "3",
+                "--tpslimit-burst", "5",
+                "--buffer-size", "64M",
+                "--use-mmap",
+                "--retries", "1",
+                "--low-level-retries", "3",
+                "--timeout", "120s",
+                "--contimeout", "30s",
             ]
-            if not is_local:
-                command += [
-                    "--drive-chunk-size", "32M",
-                    "--drive-acknowledge-abuse",
-                    "--drive-pacer-min-sleep", "10ms",
-                    "--drive-pacer-burst", "20",
-                ]
             if self.destination_type == "webdav":
                 command += ["--webdav-nextcloud-chunk-size", "64M"]
             for rule in filter_rules:
