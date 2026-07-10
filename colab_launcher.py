@@ -29,7 +29,7 @@ print("[*] Requirements installed.")
 
 # 3. Set env vars so app.py binds to 0.0.0.0
 os.environ["RELAY_HOST"] = "0.0.0.0"
-os.environ["RELAY_PORT"] = "5000"
+os.environ["RELAY_PORT"] = "5005"
 
 # 4. Start the Cloudflare tunnel in a background thread
 def start_tunnel():
@@ -37,7 +37,7 @@ def start_tunnel():
     sys.path.insert(0, GUI_DIR)
     try:
         import cloudflare_tunnel
-        cloudflare_tunnel.start_tunnel(port=5000)
+        cloudflare_tunnel.start_tunnel(port=5005)
     except Exception as e:
         print(f"[tunnel] error: {e}")
 

@@ -75,7 +75,7 @@ def main() -> int:
     # dashboard isn't exposed to the LAN.
     default_host = "0.0.0.0" if (in_colab or want_tunnel) else "127.0.0.1"
     host = _env("RELAY_HOST", default_host)
-    port = int(_env("RELAY_PORT", "5000"))
+    port = int(_env("RELAY_PORT", "5005"))
 
     print("=" * 60)
     print("  Relay — PikPak → Google Drive / WebDAV")
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     # until Flask is up, so the ordering is fine.
     want_tunnel = _env_bool("RELAY_TUNNEL", default=cloudflare_tunnel.is_colab())
     if want_tunnel:
-        port = int(_env("RELAY_PORT", "5000"))
+        port = int(_env("RELAY_PORT", "5005"))
 
         def _tunnel_thread() -> None:
             # Give Flask a moment to bind, then start the tunnel.
