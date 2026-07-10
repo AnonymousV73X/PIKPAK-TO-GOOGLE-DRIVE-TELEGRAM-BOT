@@ -6,7 +6,7 @@
 <title>{% block title %}Relay — PikPak to Drive{% endblock %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/css/style.css">
+<link rel="stylesheet" href="/static/css/style.css?v={{ range(1000, 9999) | random }}">
 </head>
 <body>
 <div class="app-shell">
@@ -39,10 +39,10 @@
     <span class="footer-os">{{ os_info.os }} · {{ os_info.arch }}</span>
   </footer>
 </div>
-<script src="/static/js/custom-select.js"></script>
-<script src="/static/js/app.js"></script>
-<script src="/static/js/custom-modal.js"></script>
-<script src="/static/js/file-browser.js"></script>
+<script src="/static/js/custom-select.js?v={{ range(1000, 9999) | random }}"></script>
+<script src="/static/js/app.js?v={{ range(1000, 9999) | random }}"></script>
+<script src="/static/js/custom-modal.js?v={{ range(1000, 9999) | random }}"></script>
+<script src="/static/js/file-browser.js?v={{ range(1000, 9999) | random }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>
