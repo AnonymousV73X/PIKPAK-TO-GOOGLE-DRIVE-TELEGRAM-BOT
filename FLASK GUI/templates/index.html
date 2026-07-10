@@ -13,13 +13,26 @@
 </div>
 
 {% if profiles|length <= 1 %}
-<div class="panel" style="margin-bottom:20px; border-color: var(--accent);">
+<div class="panel" id="transferLimitCard" style="margin-bottom:20px; border-color: var(--accent); position:relative; display:none;">
+  <button onclick="dismissLimitCard()" title="Dismiss" style="position:absolute; top:10px; right:12px; background:none; border:none; color:var(--text-muted); font-size:18px; cursor:pointer; line-height:1;">×</button>
   <span class="eyebrow">Hitting PikPak's transfer limit?</span>
   <p style="margin-top:0;">PikPak caps how much a single account can pull down / transfer out. The workaround is simple: connect a second (or third) PikPak account as its own profile here, then just switch between them from the dropdown above — each profile keeps its own PikPak login completely separate.</p>
   <p>New profiles are auto-named "default", then <code>alpha</code>, <code>bravo</code>, <code>charlie</code>, <code>delta</code>, <code>echo</code>, <code>foxtrot</code>… (NATO alphabet) so it's easy to tell them apart at a glance.</p>
   <a href="/wizard" class="btn btn-primary">+ Add another PikPak account</a>
 </div>
+<script>
+  (function() {
+    if (!localStorage.getItem('dismissLimitCard')) {
+      document.getElementById('transferLimitCard').style.display = '';
+    }
+  })();
+  function dismissLimitCard() {
+    localStorage.setItem('dismissLimitCard', '1');
+    document.getElementById('transferLimitCard').style.display = 'none';
+  }
+</script>
 {% endif %}
+
 
 <div class="panel" style="margin-bottom:20px;">
   <span class="eyebrow">Transfer relay</span>

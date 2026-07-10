@@ -424,36 +424,36 @@ class TransferJob:
                 if not ok:
                     raise RuntimeError(f"{dest_remote} remote failed: {err}")
 
-            self.log("info", "Scanning PikPak files...")
-            ok, out, err = self._run([rclone_path, "--config", config_file, "lsf", "PIKKY:", "--recursive"])
-            if not ok:
-                raise RuntimeError(f"Could not list PikPak files: {err}")
-
-            all_files = out.split("\n") if out else []
-
             if self.selected_paths:
                 selected = [p.strip("/") for p in self.selected_paths]
-                def matches(f):
-                    return any(f == s or f.startswith(s + "/") for s in selected)
-                matched_files = [f for f in all_files if matches(f)]
-                self.log("info", f"{len(matched_files)} file(s) match your selection out of {len(all_files)} total.")
+                self.log("info", f"Transferring {len(selected)} selected item(s): {', '.join(selected[:5])}{'...' if len(selected)>5 else ''}")
+                self.files_count = len(selected)
                 filter_rules = []
                 for s in selected:
+                    # Allow rclone to recurse into any subfolder needed to reach the item
+                    parts = s.split("/")
+                    for i in range(1, len(parts)):
+                        parent = "/".join(parts[:i])
+                        filter_rules.append(f"+ {parent}")
                     filter_rules.append(f"+ {s}/**")
                     filter_rules.append(f"+ {s}")
                 filter_rules.append("- *")
             else:
+                self.log("info", "Scanning PikPak files...")
+                ok, out, err = self._run([rclone_path, "--config", config_file, "lsf", "PIKKY:", "--recursive"])
+                if not ok:
+                    raise RuntimeError(f"Could not list PikPak files: {err}")
+                all_files = out.split("\n") if out else []
                 matched_files = [f for f in all_files if f.split(".")[-1].lower() in VIDEO_EXTENSIONS]
+                self.files_count = len(matched_files)
                 self.log("info", f"Found {len(all_files)} files, {len(matched_files)} videos (no manual selection, defaulting to all videos).")
                 filter_rules = ["+ */"] + [f"+ *.{ext}" for ext in VIDEO_EXTENSIONS] + ["- .*", "- *"]
 
-            self.files_count = len(matched_files)
-
-            if not matched_files:
-                self.log("warning", "Nothing matches — nothing to transfer.")
-                self.status = "completed"
-                self.end_time = datetime.now()
-                return
+                if not matched_files:
+                    self.log("warning", "Nothing matches — nothing to transfer.")
+                    self.status = "completed"
+                    self.end_time = datetime.now()
+                    return
 
             alien_name = generate_alien_name()
             self.destination_folder = f"{alien_name}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
