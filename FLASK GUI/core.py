@@ -490,13 +490,19 @@ class TransferJob:
             webdav_port = get_free_port()
             webdav_log = APP_HOME / f"rclone_webdav_{self.profile['name']}.log"
             
-            # Start WebDAV server
+            # Start WebDAV server with VFS cache so PikPak data is buffered locally
+            vfs_cache_dir = APP_HOME / "vfs_cache"
+            vfs_cache_dir.mkdir(parents=True, exist_ok=True)
             webdav_cmd = [
                 rclone_path, "--config", config_file,
                 "serve", "webdav", "PIKKY:",
                 "--addr", f"127.0.0.1:{webdav_port}",
                 "--read-only",
                 "--no-modtime",
+                "--vfs-cache-mode", "full",
+                "--vfs-cache-max-size", "2G",
+                "--cache-dir", str(vfs_cache_dir),
+                "--buffer-size", "128M",
                 "--log-level", "ERROR"
             ]
             try:
@@ -589,17 +595,18 @@ class TransferJob:
                 "--stats-log-level", "NOTICE",
                 "--transfers", "4",
                 "--checkers", "8",
-                "--size-only",
-                "--buffer-size", "128M",
+                "--ignore-checksum",       # skip expensive verify round trips
+                "--buffer-size", "32M",    # smaller buffer = faster streaming
                 "--retries", "3",
-                "--low-level-retries", "5",
+                "--low-level-retries", "10",
+                "--tpslimit", "10",        # cap API calls/s to avoid pacer sleeping
             ]
             if not is_local:
                 command += [
-                    "--drive-chunk-size", "128M", 
+                    "--drive-chunk-size", "32M",
                     "--drive-acknowledge-abuse",
-                    "--drive-pacer-min-sleep", "100ms",
-                    "--drive-pacer-burst", "10"
+                    "--drive-pacer-min-sleep", "10ms",
+                    "--drive-pacer-burst", "20",
                 ]
             if self.destination_type == "webdav":
                 command += ["--webdav-nextcloud-chunk-size", "64M"]
