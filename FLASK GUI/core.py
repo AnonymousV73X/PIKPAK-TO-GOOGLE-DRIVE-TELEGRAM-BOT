@@ -512,6 +512,17 @@ class TransferJob:
             self.process = None
             self.stop_requested = False
             self.end_time = datetime.now()
+            
+            # Persist updated rclone access token back to DB
+            try:
+                with open(config_file, "r") as f:
+                    new_config = f.read()
+                if new_config and new_config != self.profile.get("rclone_config"):
+                    Profile.save(self.profile["name"], rclone_config=new_config)
+                    self.profile["rclone_config"] = new_config
+            except Exception:
+                pass
+                
             ProfileManager.save_transfer(
                 self.profile["id"], self.status, self.destination_type,
                 self.start_time, self.end_time, self.destination_folder,
@@ -571,6 +582,19 @@ class RcloneQuery:
         try:
             result = subprocess.run([rclone_path, "--config", str(self.config_file)] + args,
                                      capture_output=True, text=True)
+            
+            # CRITICAL: rclone refreshes access tokens and writes them to the config file.
+            # If we don't save the updated config back to the DB, it logs in from scratch
+            # every single time, which quickly triggers PikPak's anti-bot Captcha.
+            try:
+                with open(self.config_file, "r") as f:
+                    new_config = f.read()
+                if new_config and new_config != self.profile.get("rclone_config"):
+                    Profile.save(self.profile["name"], rclone_config=new_config)
+                    self.profile["rclone_config"] = new_config
+            except Exception:
+                pass
+                
             return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
         except Exception as e:
             return False, "", str(e)
