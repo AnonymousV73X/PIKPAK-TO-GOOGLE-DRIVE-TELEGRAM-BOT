@@ -462,6 +462,7 @@ class TransferJob:
         matched_files = []
         self.destination_folder = None
 
+        webdav_proc = None
         try:
             self.log("info", "Checking rclone installation...")
             ok, rclone_path = RcloneInstaller.install(log=lambda m: self.log("info", m))
@@ -475,6 +476,57 @@ class TransferJob:
             ok, _, err = self._run([rclone_path, "--config", config_file, "lsd", "PIKKY:"])
             if not ok:
                 raise RuntimeError(f"PIKKY remote failed: {err}")
+
+            # ── Spin up local WebDAV serve bridge (matches Telegram Bot logic) ──
+            self.log("info", "Spawning local WebDAV bridge to bypass PikPak speed limits...")
+            import socket
+            def get_free_port():
+                s = socket.socket()
+                s.bind(('127.0.0.1', 0))
+                port = s.getsockname()[1]
+                s.close()
+                return port
+            
+            webdav_port = get_free_port()
+            webdav_log = APP_HOME / f"rclone_webdav_{self.profile['name']}.log"
+            
+            # Start WebDAV server
+            webdav_cmd = [
+                rclone_path, "--config", config_file,
+                "serve", "webdav", "PIKKY:",
+                "--addr", f"127.0.0.1:{webdav_port}",
+                "--read-only",
+                "--no-modtime",
+                "--log-level", "ERROR"
+            ]
+            try:
+                wl = open(webdav_log, "w")
+                webdav_proc = subprocess.Popen(webdav_cmd, stdout=wl, stderr=wl)
+            except Exception as e:
+                raise RuntimeError(f"Failed to launch WebDAV bridge: {e}")
+
+            # Wait for WebDAV server to be ready
+            self.log("info", f"Waiting for WebDAV bridge to become active on port {webdav_port}...")
+            ready = False
+            for _ in range(20):
+                if self.stop_requested or webdav_proc.poll() is not None:
+                    break
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{webdav_port}", timeout=1)
+                    ready = True
+                    break
+                except Exception:
+                    time.sleep(0.5)
+            
+            if not ready:
+                if webdav_proc.poll() is not None:
+                    raise RuntimeError("WebDAV bridge died immediately. Check logs.")
+                raise RuntimeError("WebDAV bridge failed to respond in time.")
+
+            # Append the temporary WebDAV remote to the temporary config file
+            webdav_remote = f"PIKPAKDAV_{self.profile['id']}"
+            with open(config_file, "a") as f:
+                f.write(f"\n[{webdav_remote}]\ntype = webdav\nurl = http://127.0.0.1:{webdav_port}\nvendor = other\npacer_min_sleep = 0\n")
 
             is_local = self.destination_type == "local"
             if is_local:
@@ -503,7 +555,8 @@ class TransferJob:
                 filter_rules.append("- *")
             else:
                 self.log("info", "Scanning PikPak files...")
-                ok, out, err = self._run([rclone_path, "--config", config_file, "lsf", "PIKKY:", "--recursive"])
+                # Scan through WebDAV server (faster & cached by rclone serve)
+                ok, out, err = self._run([rclone_path, "--config", config_file, "lsf", f"{webdav_remote}:", "--recursive"])
                 if not ok:
                     raise RuntimeError(f"Could not list PikPak files: {err}")
                 all_files = out.split("\n") if out else []
@@ -527,23 +580,22 @@ class TransferJob:
             else:
                 dest_arg = f"{dest_remote}:{self.destination_folder}"
 
-            # Use JSON logging for reliable stats parsing.
-            # --stats-one-line uses \r which breaks line iteration; JSON log uses \n.
+            # Copy from PIKPAKDAV bridge instead of raw PIKKY remote
             command = [
                 rclone_path, "--config", config_file,
-                "copy", "PIKKY:", dest_arg,
+                "copy", f"{webdav_remote}:", dest_arg,
                 "--use-json-log",
                 "--stats", "2s",
-                "--stats-log-level", "INFO",
-                "--transfers", "4",
-                "--checkers", "8",
-                "--fast-list",
-                "--buffer-size", "128M",
-                "--retries", "3",
-                "--low-level-retries", "5",
+                "--stats-log-level", "NOTICE",
+                "--transfers", "2",
+                "--checkers", "4",
+                "--size-only",
+                "--buffer-size", "64M",
+                "--retries", "1",
+                "--low-level-retries", "3",
             ]
             if not is_local:
-                command += ["--drive-chunk-size", "128M"]
+                command += ["--drive-chunk-size", "64M", "--drive-acknowledge-abuse"]
             if self.destination_type == "webdav":
                 command += ["--webdav-nextcloud-chunk-size", "64M"]
             for rule in filter_rules:
@@ -552,25 +604,14 @@ class TransferJob:
             self.log("info", f"Starting transfer to {'local:' + dest_arg if is_local else dest_arg}")
             self.process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,  # rclone writes JSON log to stderr
-                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
 
-            # Read stderr (JSON log) in a background thread, stdout normally
-            import threading as _th
-
-            def _read_stderr():
-                for raw in self.process.stderr:
-                    self._handle_log_line(raw)
-
-            stderr_thread = _th.Thread(target=_read_stderr, daemon=True)
-            stderr_thread.start()
-
             for raw_line in self.process.stdout:
-                # stdout carries non-JSON progress lines in some rclone versions
-                self._handle_stdout_line(raw_line.strip())
+                self._handle_log_line(raw_line)
                 if self.stop_requested:
                     self.process.terminate()
                     time.sleep(1)
@@ -578,7 +619,6 @@ class TransferJob:
                         self.process.kill()
                     break
 
-            stderr_thread.join(timeout=5)
             self.process.wait()
 
             if self.stop_requested:
@@ -602,6 +642,17 @@ class TransferJob:
             self.stop_requested = False
             self.end_time = datetime.now()
             
+            # Kill the WebDAV bridge
+            if webdav_proc:
+                try:
+                    webdav_proc.terminate()
+                    webdav_proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        webdav_proc.kill()
+                    except Exception:
+                        pass
+
             # Persist updated rclone access token back to DB
             try:
                 with open(config_file, "r") as f:
