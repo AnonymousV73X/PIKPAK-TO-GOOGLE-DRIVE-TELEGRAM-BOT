@@ -13,7 +13,9 @@
     if (ok)
       return dest === "gdrive"
         ? "✓ Google Drive config looks complete"
-        : "✓ WebDAV details look complete";
+        : dest === "webdav"
+          ? "✓ WebDAV details look complete"
+          : "✓ Local folder chosen";
     return "Fill in the fields above to continue";
   }
 
@@ -41,11 +43,13 @@
     let ok = false;
     if (dest === "gdrive") {
       ok = document.getElementById("gdriveConfig").value.trim().length > 10;
-    } else {
+    } else if (dest === "webdav") {
       ok =
         document.getElementById("webdavUrl").value.trim().length > 0 &&
         document.getElementById("webdavUser").value.trim().length > 0 &&
         document.getElementById("webdavPass").value.trim().length > 0;
+    } else {
+      ok = document.getElementById("localPath").value.trim().length > 0;
     }
     stepDone[4] = ok;
     const statusEl = document.getElementById("destStatus");
@@ -148,9 +152,26 @@
         dest === "gdrive" ? "block" : "none";
       document.getElementById("webdavFields").style.display =
         dest === "webdav" ? "block" : "none";
+      document.getElementById("localFields").style.display =
+        dest === "local" ? "block" : "none";
       checkStep4();
     });
   });
+
+  const chooseLocalFolderBtn = document.getElementById("chooseLocalFolderBtn");
+  if (chooseLocalFolderBtn) {
+    chooseLocalFolderBtn.addEventListener("click", async () => {
+      const result = await window.openFileBrowser({
+        mode: "pickdir",
+        title: "Choose a local destination folder",
+      });
+      if (result && result.path) {
+        document.getElementById("localPath").value = result.path;
+        document.getElementById("localPathDisplay").textContent = result.path;
+        checkStep4();
+      }
+    });
+  }
 
   // Install rclone
   const installBtn = document.getElementById("installBtn");
@@ -193,13 +214,15 @@
     let destConfig = "";
     if (dest === "gdrive") {
       destConfig = document.getElementById("gdriveConfig").value.trim();
-    } else {
+    } else if (dest === "webdav") {
       const url = document.getElementById("webdavUrl").value.trim();
       const user = document.getElementById("webdavUser").value.trim();
       const pass = document.getElementById("webdavPass").value.trim();
       destConfig = `[WEBDAV]\ntype = webdav\nurl = ${url}\nvendor = other\nuser = ${user}\npass = ${pass}`;
     }
-    return { config: `${pikpak}\n\n${destConfig}\n`, dest };
+    // local storage has no rclone remote — nothing to append
+    const config = destConfig ? `${pikpak}\n\n${destConfig}\n` : `${pikpak}\n`;
+    return { config, dest };
   }
 
   const verifyBtn = document.getElementById("verifyBtn");
@@ -220,6 +243,7 @@
             name,
             rclone_config: config,
             destination: dest,
+            local_destination_path: document.getElementById("localPath").value.trim(),
           }),
         });
         const data = await res.json();
@@ -250,6 +274,7 @@
     const webdavUrl = document.getElementById("webdavUrl").value.trim();
     const webdavUser = document.getElementById("webdavUser").value.trim();
     const webdavPass = document.getElementById("webdavPass").value.trim();
+    const localPath = document.getElementById("localPath").value.trim();
     try {
       await fetch("/api/profile/save", {
         method: "POST",
@@ -261,6 +286,7 @@
           webdav_url: webdavUrl,
           webdav_user: webdavUser,
           webdav_pass: webdavPass,
+          local_destination_path: localPath,
         }),
       });
       window.location.href = "/";

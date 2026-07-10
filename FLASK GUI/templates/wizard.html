@@ -124,6 +124,13 @@
         <p>Free, works with Nextcloud, Koofr, and other WebDAV-compatible storage.</p>
       </div>
     </div>
+    <div class="option-card" data-dest="local">
+      <input type="radio" name="dest" value="local">
+      <div class="option-card-body">
+        <h3>Local storage</h3>
+        <p>Transfer straight onto this machine's disk — no destination account needed at all.</p>
+      </div>
+    </div>
 
     <div id="gdriveFields">
       <div class="term-flow">
@@ -207,6 +214,15 @@
       <label for="webdavPass">Password</label>
       <input type="password" id="webdavPass">
       <p class="doc-links"><a href="https://rclone.org/webdav/" target="_blank" rel="noopener">rclone WebDAV docs ↗</a></p>
+    </div>
+    <div id="localFields" style="display:none;">
+      <label for="localPath">Destination folder on this machine</label>
+      <div class="local-path-row">
+        <span class="local-path-display" id="localPathDisplay">No folder chosen yet</span>
+        <button type="button" class="btn" id="chooseLocalFolderBtn">Choose folder…</button>
+      </div>
+      <input type="hidden" id="localPath" value="">
+      <p class="field-hint">Video files will land in a timestamped subfolder inside whatever you pick here.</p>
     </div>
     <div class="status-line" id="destStatus"></div>
   </div>

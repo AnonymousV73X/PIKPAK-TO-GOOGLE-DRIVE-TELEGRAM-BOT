@@ -42,25 +42,57 @@
       <select id="destinationSelect" class="styled-select" style="width:auto; margin:0;">
         <option value="gdrive" {{ 'selected' if profile.default_destination == 'gdrive' else '' }}>Google Drive</option>
         <option value="webdav" {{ 'selected' if profile.default_destination == 'webdav' else '' }}>WebDAV</option>
+        <option value="local" {{ 'selected' if profile.default_destination == 'local' else '' }}>Local storage</option>
       </select>
       <button class="btn btn-primary" id="startBtn">Start transfer</button>
       <button class="btn btn-danger" id="stopBtn" style="display:none;">Stop</button>
+    </div>
+  </div>
+
+  <div id="localPathPanel" style="display:none; margin-top:14px; border-top:1px solid var(--panel-border); padding-top:14px;">
+    <span class="eyebrow">Local destination folder</span>
+    <div class="local-path-row">
+      <span class="local-path-display" id="localPathDisplay">{{ profile.local_destination_path or 'No folder chosen yet' }}</span>
+      <button class="btn" id="chooseLocalFolderBtn">Choose folder…</button>
     </div>
   </div>
 </div>
 
 <div class="grid grid-3" style="margin-bottom:20px;">
   <div class="panel stat-card">
-    <span class="stat-label">Upload speed</span>
-    <span class="stat-value accent" id="uploadSpeed">—</span>
+    <span class="stat-label">Transfer speed</span>
+    <span class="stat-value accent" id="transferSpeed">—</span>
   </div>
   <div class="panel stat-card">
-    <span class="stat-label">Download speed</span>
-    <span class="stat-value accent" id="downloadSpeed">—</span>
-  </div>
-  <div class="panel stat-card">
-    <span class="stat-label">Elapsed</span>
+    <span class="stat-label">Elapsed (this transfer)</span>
     <span class="stat-value" id="elapsed">00:00:00</span>
+  </div>
+  <div class="panel stat-card">
+    <span class="stat-label">Progress</span>
+    <span class="stat-value" id="progressPct">0%</span>
+    <div class="progress-bar-track"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div class="progress-meta"><span id="progressTransferred">—</span><span id="progressEta">—</span></div>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:20px;">
+  <span class="eyebrow">Files to transfer</span>
+  <p style="margin-top:0;">By default, every video file on PikPak is transferred. Browse PikPak to hand-pick only the specific files or folders you want instead.</p>
+  <div class="selection-summary">
+    <span class="selection-summary-text" id="selectionSummaryText">All video files (no manual selection)</span>
+    <div class="selection-summary-actions">
+      <button class="btn" id="browseSourceBtn">Browse &amp; select from PikPak</button>
+      <button class="btn" id="clearSelectionBtn" style="display:none;">Clear selection</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:20px;">
+  <span class="eyebrow">Browse storage</span>
+  <p style="margin-top:0;">Look through the full folder structure on either side, without picking anything.</p>
+  <div class="storage-tools-actions">
+    <button class="btn" id="viewSourceBtn">View PikPak folders</button>
+    <button class="btn" id="viewDestBtn">View destination folders</button>
   </div>
 </div>
 
@@ -131,9 +163,37 @@ const track = document.getElementById('orbitTrack');
 const consoleEl = document.getElementById('console');
 const destSelect = document.getElementById('destinationSelect');
 const destLabel = document.getElementById('destLabel');
+const localPathPanel = document.getElementById('localPathPanel');
+const localPathDisplay = document.getElementById('localPathDisplay');
+const chooseLocalFolderBtn = document.getElementById('chooseLocalFolderBtn');
 
-destSelect.addEventListener('change', () => {
-  destLabel.textContent = destSelect.value === 'gdrive' ? 'DRIVE' : 'WEBDAV';
+let selectedPaths = [];
+
+function destDisplayLabel(v) {
+  return v === 'gdrive' ? 'DRIVE' : v === 'webdav' ? 'WEBDAV' : 'LOCAL';
+}
+
+function refreshDestUi() {
+  destLabel.textContent = destDisplayLabel(destSelect.value);
+  localPathPanel.style.display = destSelect.value === 'local' ? 'block' : 'none';
+}
+refreshDestUi();
+destSelect.addEventListener('change', refreshDestUi);
+
+chooseLocalFolderBtn.addEventListener('click', async () => {
+  const result = await window.openFileBrowser({ mode: 'pickdir', title: 'Choose a local destination folder' });
+  if (!result || !result.path) return;
+  const res = await fetch('/api/profile/local_path', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: result.path })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    localPathDisplay.textContent = data.path;
+    loadStats();
+  } else {
+    await window.customAlert(data.error || 'Could not set folder.', 'Error');
+  }
 });
 
 document.getElementById('profileSelect').addEventListener('change', async (e) => {
@@ -148,7 +208,7 @@ startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   await fetch('/api/transfer/start', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ destination: destSelect.value })
+    body: JSON.stringify({ destination: destSelect.value, selected_paths: selectedPaths })
   });
   poll();
 });
@@ -193,11 +253,13 @@ async function poll() {
     const data = await res.json();
     setBadge(data.status);
 
-    if (data.network) {
-      document.getElementById('uploadSpeed').textContent = data.network.upload_speed;
-      document.getElementById('downloadSpeed').textContent = data.network.download_speed;
-      document.getElementById('elapsed').textContent = fmtElapsed(data.network.elapsed_seconds);
-    }
+    document.getElementById('elapsed').textContent = fmtElapsed(data.elapsed_seconds);
+    document.getElementById('transferSpeed').textContent = data.status === 'running' ? (data.speed || 'calculating…') : '—';
+    const pct = data.progress_pct || 0;
+    document.getElementById('progressPct').textContent = pct + '%';
+    document.getElementById('progressFill').style.width = pct + '%';
+    document.getElementById('progressTransferred').textContent = data.transferred || '—';
+    document.getElementById('progressEta').textContent = data.status === 'running' ? ('ETA ' + (data.eta || '—')) : '—';
 
     if (data.logs && data.logs.length) {
       consoleEl.innerHTML = data.logs.map(l =>
@@ -291,7 +353,8 @@ async function loadDriveFolders() {
 }
 
 clearPikpakBtn.addEventListener('click', async () => {
-  if (!confirm('Delete everything in this profile\'s PikPak account? This cannot be undone.')) return;
+  const proceed = await window.customConfirm('Delete everything in this profile\'s PikPak account? This cannot be undone.', 'Clear PikPak', { danger: true, confirmLabel: 'Delete everything' });
+  if (!proceed) return;
   clearPikpakBtn.disabled = true;
   showStorageStatus('Clearing PikPak…');
   try {
@@ -313,7 +376,8 @@ clearPikpakBtn.addEventListener('click', async () => {
 clearDriveBtn.addEventListener('click', async () => {
   const path = driveClearSelect.value;
   if (!path) return;
-  if (!confirm(`Delete the folder "${path}" and everything inside it from the drive? This cannot be undone.`)) return;
+  const proceed = await window.customConfirm(`Delete the folder "${path}" and everything inside it from the drive? This cannot be undone.`, 'Clear folder', { danger: true, confirmLabel: 'Delete folder' });
+  if (!proceed) return;
   clearDriveBtn.disabled = true;
   showStorageStatus(`Clearing "${path}"…`);
   try {
@@ -337,6 +401,51 @@ clearDriveBtn.addEventListener('click', async () => {
 });
 
 loadDriveFolders();
+
+// ---- Files-to-transfer selection (browse PikPak, pick exact files/folders) ----
+const browseSourceBtn = document.getElementById('browseSourceBtn');
+const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+const selectionSummaryText = document.getElementById('selectionSummaryText');
+const viewSourceBtn = document.getElementById('viewSourceBtn');
+const viewDestBtn = document.getElementById('viewDestBtn');
+
+function updateSelectionSummary() {
+  if (!selectedPaths.length) {
+    selectionSummaryText.textContent = 'All video files (no manual selection)';
+    clearSelectionBtn.style.display = 'none';
+  } else {
+    selectionSummaryText.textContent = `${selectedPaths.length} item(s) selected for transfer`;
+    clearSelectionBtn.style.display = 'inline-flex';
+  }
+}
+
+browseSourceBtn.addEventListener('click', async () => {
+  const result = await window.openFileBrowser({
+    mode: 'select',
+    remote: 'source',
+    title: 'Select files/folders from PikPak',
+    initialSelected: selectedPaths,
+  });
+  if (result && result.selected) {
+    selectedPaths = result.selected;
+    updateSelectionSummary();
+  }
+});
+
+clearSelectionBtn.addEventListener('click', () => {
+  selectedPaths = [];
+  updateSelectionSummary();
+});
+
+viewSourceBtn.addEventListener('click', () => {
+  window.openFileBrowser({ mode: 'view', remote: 'source', title: 'PikPak folders' });
+});
+
+viewDestBtn.addEventListener('click', () => {
+  window.openFileBrowser({ mode: 'view', remote: 'dest', title: 'Destination folders' });
+});
+
+updateSelectionSummary();
 
 poll();
 loadStats();

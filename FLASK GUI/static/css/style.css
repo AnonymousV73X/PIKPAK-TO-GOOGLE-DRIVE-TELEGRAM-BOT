@@ -732,3 +732,68 @@ html[data-theme="light"] .console { background: #eef1f4; }
 .storage-tools-status { font-size: 12px; color: var(--text-faint); margin-top: 6px; width: 100%; }
 .storage-tools-status.status-ok { color: var(--accent); }
 .storage-tools-status.status-fail { color: var(--danger); }
+/* ================= Custom alert/confirm modal ================= */
+.cmodal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; opacity: 0; pointer-events: none; transition: opacity .15s ease;
+}
+.cmodal-overlay.open { opacity: 1; pointer-events: all; }
+.cmodal {
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius);
+  padding: 24px; max-width: 420px; width: calc(100% - 40px);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  transform: translateY(8px); transition: transform .15s ease;
+}
+.cmodal-overlay.open .cmodal { transform: translateY(0); }
+.cmodal-icon {
+  width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 18px; margin-bottom: 12px;
+}
+.cmodal-icon-info { background: var(--accent-soft); color: var(--accent); }
+.cmodal-icon-danger { background: var(--danger-soft); color: var(--danger); }
+.cmodal-icon-success { background: var(--accent-soft); color: var(--accent); }
+.cmodal-title { font-family: var(--font-display); font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+.cmodal-message { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin-bottom: 20px; white-space: pre-wrap; }
+.cmodal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+/* ================= File / folder browser modal ================= */
+.fb-overlay .fb-modal {
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius);
+  width: min(640px, calc(100% - 40px)); max-height: 78vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+}
+.fb-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--panel-border); }
+.fb-title { font-family: var(--font-display); font-weight: 600; font-size: 15px; }
+.fb-close { background: none; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; line-height: 1; padding: 2px 6px; }
+.fb-close:hover { color: var(--text); }
+.fb-breadcrumbs { padding: 10px 18px; font-size: 12.5px; color: var(--text-faint); border-bottom: 1px solid var(--panel-border); overflow-x: auto; white-space: nowrap; }
+.fb-crumb { cursor: pointer; color: var(--text-muted); }
+.fb-crumb:hover { color: var(--accent); text-decoration: underline; }
+.fb-crumb-sep { color: var(--text-faint); margin: 0 2px; }
+.fb-list { flex: 1; overflow-y: auto; padding: 6px 8px; min-height: 220px; }
+.fb-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13.5px; }
+.fb-row:hover { background: var(--accent-soft); }
+.fb-row-icon { font-size: 14px; flex-shrink: 0; }
+.fb-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-row-size { color: var(--text-faint); font-size: 12px; flex-shrink: 0; }
+.fb-checkbox { flex-shrink: 0; accent-color: var(--accent); width: 15px; height: 15px; }
+.fb-loading, .fb-empty, .fb-error { color: var(--text-faint); padding: 20px; text-align: center; font-size: 13px; }
+.fb-error { color: var(--danger); }
+.fb-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--panel-border); }
+.fb-selected-count { font-size: 12.5px; color: var(--text-faint); }
+.fb-footer-actions { display: flex; gap: 10px; }
+
+/* ================= Transfer progress bar ================= */
+.progress-bar-track { width: 100%; height: 8px; border-radius: 999px; background: var(--panel-border); overflow: hidden; margin-top: 8px; }
+.progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); border-radius: 999px; transition: width .4s ease; width: 0%; }
+.progress-meta { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-faint); margin-top: 6px; }
+
+/* ================= Local storage folder field ================= */
+.local-path-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.local-path-display { flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; background: var(--bg-elevated); border: 1px solid var(--panel-border); font-size: 12.5px; color: var(--text-muted); font-family: var(--font-mono, monospace); }
+
+/* ================= Files-to-transfer selection summary ================= */
+.selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.selection-summary-text { font-size: 13px; color: var(--text-muted); }
+.selection-summary-actions { display: flex; gap: 8px; }

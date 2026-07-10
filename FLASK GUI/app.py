@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 from datetime import datetime
+import os
 import core
 
 app = Flask(__name__)
@@ -63,10 +64,25 @@ def api_verify_profile():
         "rclone_config": data.get("rclone_config", ""),
     }
     checker = core.RcloneQuery(fake_profile)
+    destination = data.get("destination", "gdrive")
+    remotes = ["PIKKY"]
+    if destination == "gdrive":
+        remotes.append("GDRIVE")
+    elif destination == "webdav":
+        remotes.append("WEBDAV")
+    # local storage has no remote to verify — just PIKKY needs checking
     results = {}
-    for remote in ["PIKKY", "GDRIVE" if data.get("destination", "gdrive") == "gdrive" else "WEBDAV"]:
+    for remote in remotes:
         ok, out, err = checker._run(["lsd", f"{remote}:"])
         results[remote] = {"ok": ok, "error": err if not ok else None}
+    if destination == "local":
+        path = data.get("local_destination_path") or ""
+        try:
+            import os as _os
+            _os.makedirs(path or str(__import__("pathlib").Path.home() / "PikpakTransfers"), exist_ok=True)
+            results["LOCAL"] = {"ok": True, "error": None}
+        except Exception as e:
+            results["LOCAL"] = {"ok": False, "error": str(e)}
     return jsonify(results)
 
 
@@ -80,9 +96,26 @@ def api_save_profile():
         webdav_url=data.get("webdav_url"),
         webdav_user=data.get("webdav_user"),
         webdav_pass=data.get("webdav_pass"),
+        local_destination_path=data.get("local_destination_path"),
         default_destination=data.get("default_destination", "gdrive"),
     )
     return jsonify({"ok": True})
+
+
+@app.route("/api/profile/local_path", methods=["POST"])
+def api_set_local_path():
+    profile = current_profile()
+    if not profile:
+        return jsonify({"ok": False, "error": "No active profile"}), 400
+    path = (request.json or {}).get("path", "").strip()
+    if not path:
+        return jsonify({"ok": False, "error": "Pick a folder first."}), 400
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    core.ProfileManager.set_local_path(profile["name"], path)
+    return jsonify({"ok": True, "path": path})
 
 
 @app.route("/api/profile/switch", methods=["POST"])
@@ -111,9 +144,11 @@ def api_transfer_start():
     profile = current_profile()
     if not profile:
         return jsonify({"ok": False, "error": "No active profile"}), 400
-    destination = (request.json or {}).get("destination", profile.get("default_destination", "gdrive"))
+    data = request.json or {}
+    destination = data.get("destination", profile.get("default_destination", "gdrive"))
+    selected_paths = data.get("selected_paths") or []
     job = core.get_job(profile["name"], profile)
-    ok, message = job.start(destination_type=destination)
+    ok, message = job.start(destination_type=destination, selected_paths=selected_paths)
     return jsonify({"ok": ok, "message": message})
 
 
@@ -158,13 +193,22 @@ def api_stats_pikpak():
     return jsonify({"about": about, "videos": videos})
 
 
+def _dest_remote(profile):
+    dest = profile.get("default_destination")
+    if dest == "webdav":
+        return "WEBDAV"
+    if dest == "local":
+        return "LOCAL"
+    return "GDRIVE"
+
+
 @app.route("/api/stats/drive")
 def api_stats_drive():
     profile = current_profile()
     if not profile:
         return jsonify({"error": "No active profile"}), 400
     q = core.RcloneQuery(profile)
-    remote = "WEBDAV" if profile.get("default_destination") == "webdav" else "GDRIVE"
+    remote = _dest_remote(profile)
     about = q.about(remote)
     return jsonify({"about": about, "remote": remote})
 
@@ -175,9 +219,41 @@ def api_stats_drive_list():
     if not profile:
         return jsonify({"error": "No active profile"}), 400
     q = core.RcloneQuery(profile)
-    remote = "WEBDAV" if profile.get("default_destination") == "webdav" else "GDRIVE"
+    remote = _dest_remote(profile)
     path = request.args.get("path", "")
     return jsonify(q.list_dir(remote, path))
+
+
+# ---------- Storage browsing (for file/folder selection) ----------
+
+@app.route("/api/browse/source")
+def api_browse_source():
+    """Browse the PikPak (source) remote — used to pick specific files/folders to transfer."""
+    profile = current_profile()
+    if not profile:
+        return jsonify({"error": "No active profile"}), 400
+    q = core.RcloneQuery(profile)
+    path = request.args.get("path", "")
+    return jsonify(q.list_dir("PIKKY", path))
+
+
+@app.route("/api/browse/dest")
+def api_browse_dest():
+    """Browse the current destination (gdrive / webdav / local) — read only."""
+    profile = current_profile()
+    if not profile:
+        return jsonify({"error": "No active profile"}), 400
+    q = core.RcloneQuery(profile)
+    remote = _dest_remote(profile)
+    path = request.args.get("path", "")
+    return jsonify(q.list_dir(remote, path))
+
+
+@app.route("/api/browse/fs")
+def api_browse_fs():
+    """Browse the local filesystem — used for the local-storage destination folder picker."""
+    path = request.args.get("path") or None
+    return jsonify(core.browse_filesystem(path))
 
 
 # ---------- Clear / cleanup ----------
@@ -208,7 +284,7 @@ def api_drive_clear():
     if job.status == "running":
         return jsonify({"ok": False, "error": "Stop the current transfer before clearing the drive."}), 400
     q = core.RcloneQuery(profile)
-    remote = "WEBDAV" if profile.get("default_destination") == "webdav" else "GDRIVE"
+    remote = _dest_remote(profile)
     result = q.clear(remote, path)
     return jsonify(result)
 
