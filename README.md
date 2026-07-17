@@ -1,4 +1,4 @@
-# PikPak → Google Drive Telegram Bot (with Web GUI)
+# PikPak to Google Drive Telegram Bot OR Web GUI ...
 
 ![Relay Dashboard](FLASK%20GUI/screenshots/dashboard.png)
 
